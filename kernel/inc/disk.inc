@@ -137,6 +137,42 @@ disk_init:
         ret
 
 ; ---------------------------------------------------------------------------
+; ドライブ番号つきの入口
+;
+; いまは A: しかないので中身は同じだが、上位はすべてここを通しておく。
+; 複数ドライブを足すときに直すのがこの 3 つだけで済む。
+; ---------------------------------------------------------------------------
+disk_read_drive:                        ; DL = ドライブ, AX = LBA, CX = 数, ES:BX = 先
+        call    disk_read
+        ret
+
+disk_write_drive:                       ; DL = ドライブ
+        call    disk_write
+        ret
+
+dpb_for_drive:                          ; AL = ドライブ → BX = DPB
+        mov     bx, dpb
+        ret
+
+; ---------------------------------------------------------------------------
+; disk_read_unit / disk_write_unit - ブロックデバイスドライバから呼ばれる入口
+;   入力: AX = LBA, CX = セクタ数, ES:BX = バッファ, [blk_unit] = ユニット
+; ---------------------------------------------------------------------------
+disk_read_unit:
+        push    dx
+        mov     dl, [blk_unit]
+        call    disk_read_drive
+        pop     dx
+        ret
+
+disk_write_unit:
+        push    dx
+        mov     dl, [blk_unit]
+        call    disk_write_drive
+        pop     dx
+        ret
+
+; ---------------------------------------------------------------------------
 ; disk_read - LBA から連続したセクタを読む
 ;   入力: AX = 開始 LBA, CX = セクタ数, ES:BX = 転送先
 ;   出力: CF=1 なら失敗。全レジスタは保存される
@@ -307,7 +343,7 @@ disk_flush_fat:
         mov     byte [fat_dirty], 0
         pop     es
         popa
-        clc
+        call    buf_flush
         ret
 .fail:
         pop     es
@@ -315,7 +351,7 @@ disk_flush_fat:
         stc
         ret
 .nothing:
-        clc
+        call    buf_flush
         ret
 
 ; ---------------------------------------------------------------------------

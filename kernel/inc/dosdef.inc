@@ -114,35 +114,209 @@ ATTR_DIRECTORY  equ 0x10
 ATTR_ARCHIVE    equ 0x20
 ATTR_LFN        equ 0x0F        ; 長いファイル名の断片 (無視する)
 
-; --- ファイルハンドル -------------------------------------------------------
-SFT_ENTRIES     equ 40          ; システム全体で開けるファイル数
-SFT_NAME        equ 0x00        ; 11 バイト: 8.3 名
-SFT_MODE        equ 0x0B        ; byte: オープンモード
-SFT_ATTR        equ 0x0C        ; byte: 属性
-SFT_CLUSTER     equ 0x0D        ; word: 先頭クラスタ
-SFT_SIZE        equ 0x0F        ; dword: ファイルサイズ
-SFT_POS         equ 0x13        ; dword: 現在位置
-SFT_REFCNT      equ 0x17        ; byte: この SFT を指しているハンドルの数
-SFT_DEVICE      equ 0x18        ; byte: 0=ファイル, 1=CON, 2=NUL, 3=AUX, 4=PRN
-SFT_DIRSEC      equ 0x19        ; word: ディレクトリエントリのある LBA
-SFT_DIRENT      equ 0x1B        ; byte: そのセクタ内のエントリ番号
-SFT_FLAGS       equ 0x1C        ; byte: bit0 = 書き換えられた
-SFT_CIDX        equ 0x1D        ; word: 直前に辿ったクラスタの番号 (0 起算)
-SFT_CCLUS       equ 0x1F        ; word: そのときのクラスタ番号
-SFT_DIRCLUS     equ 0x21        ; word: 親ディレクトリのクラスタ (0 = ルート)
-SFT_ENTSIZE     equ 48
+; --- SFT (System File Table) -----------------------------------------------
+;
+; DOS 4.0 以降の 59 バイト形式。当時のツール (ファイラ、デバッガ、
+; ハンドルを覗く常駐ソフト) は List of Lists から SFT 連鎖を辿って
+; ここを直接読むので、独自の形にしていると軒並み誤動作する。
+;
+; SFT はシステム全体で 1 つのテーブル。PSP の JFT (ハンドル → SFT 番号) が
+; そこを指すという 2 段構えで、AH=45h の複製や AH=46h のリダイレクトが
+; 「JFT の項目を同じ SFT に向け直す」だけで済むようになっている。
+SFT_REFCNT      equ 0x00        ; word: この SFT を指しているハンドルの数
+SFT_MODE        equ 0x02        ; word: オープンモード
+SFT_ATTR        equ 0x04        ; byte: ファイル属性
+SFT_DEVINFO     equ 0x05        ; word: デバイス情報 (下記)
+SFT_DEVPTR      equ 0x07        ; dword: デバイスヘッダ (文字) / DPB (ブロック)
+SFT_CLUSTER     equ 0x0B        ; word: 先頭クラスタ
+SFT_TIME        equ 0x0D        ; word
+SFT_DATE        equ 0x0F        ; word
+SFT_SIZE        equ 0x11        ; dword: ファイルサイズ
+SFT_POS         equ 0x15        ; dword: 現在位置
+SFT_CIDX        equ 0x19        ; word: 直前に辿った相対クラスタ番号
+SFT_DIRSEC      equ 0x1B        ; dword: ディレクトリエントリのあるセクタ
+SFT_DIRENT      equ 0x1F        ; byte: そのセクタ内のエントリ番号
+SFT_NAME        equ 0x20        ; 11 バイト: 8.3 名
+SFT_SHARE_PREV  equ 0x2B        ; dword: SHARE 用
+SFT_MACHINE     equ 0x2F        ; word: ネットワークのマシン番号
+SFT_OWNER       equ 0x31        ; word: 所有プロセスの PSP
+SFT_SHAREREC    equ 0x33        ; word: SHARE のレコード
+SFT_CCLUS       equ 0x35        ; word: 直前に辿った絶対クラスタ番号
+SFT_IFS         equ 0x37        ; dword: IFS ドライバ (0 = 通常)
+SFT_ENTSIZE     equ 0x3B        ; 59 バイト
 
+; SFT テーブルのヘッダ (List of Lists の +04 が指す先)
+SFTH_NEXT       equ 0x00        ; dword: 次のテーブル (FFFF:FFFF = 最後)
+SFTH_COUNT      equ 0x04        ; word: このテーブルのエントリ数
+SFTH_ENTRIES    equ 0x06        ; ここから SFT が並ぶ
+SFT_ENTRIES     equ 40          ; システム全体で開けるファイル数の既定値
+
+; SFT_DEVINFO のビット
+SFTI_CHAR       equ 0x8000      ; 1 = 文字デバイス, 0 = ブロック (ディスク上のファイル)
+SFTI_NETWORK    equ 0x0800
+SFTI_IOCTL      equ 0x4000      ; IOCTL に対応している
+SFTI_CLEAN      equ 0x0040      ; 1 = まだ書き込まれていない (0 = 書き換え済み)
+SFTI_EOF        equ 0x0040
+SFTI_BINARY     equ 0x0020      ; 1 = バイナリ (raw) モード
+SFTI_CLOCK      equ 0x0008
+SFTI_NUL        equ 0x0004
+SFTI_STDOUT     equ 0x0002
+SFTI_STDIN      equ 0x0001
+SFTI_DRIVE      equ 0x003F      ; ブロックデバイスのときはドライブ番号
+
+; 我々が扱う文字デバイスの種類 (SFT_DEVPTR の指す先で判別する)
 SFT_DEV_FILE    equ 0
 SFT_DEV_CON     equ 1
 SFT_DEV_NUL     equ 2
 SFT_DEV_AUX     equ 3
 SFT_DEV_PRN     equ 4
-
-SFT_FLAG_DIRTY  equ 0x01
+SFT_DEV_CLOCK   equ 5
 
 OPEN_READ       equ 0
 OPEN_WRITE      equ 1
 OPEN_RDWR       equ 2
+
+; --- CDS (Current Directory Structure) --------------------------------------
+;
+; ドライブごとのカレントディレクトリ。DOS 4.0 以降は 88 バイト。
+; List of Lists の +16h がこの配列を指し、LASTDRIVE の数だけ並ぶ。
+; 「A: のカレントは \DOS、C: のカレントは \TOOLS」を同時に覚えていられるのは
+; この配列があるから。複数ドライブと SUBST/JOIN の土台でもある。
+CDS_PATH        equ 0x00        ; 67 バイト: "X:\PATH" 形式の ASCIZ
+CDS_FLAGS       equ 0x43        ; word: 属性 (下記)
+CDS_DPB         equ 0x45        ; dword: このドライブの DPB
+CDS_CLUSTER     equ 0x49        ; word: カレントディレクトリの先頭クラスタ
+CDS_UNKNOWN1    equ 0x4B        ; word
+CDS_UNKNOWN2    equ 0x4D        ; dword
+CDS_ROOTLEN     equ 0x51        ; word: パス中でルートの直後にあたる位置
+CDS_UNKNOWN3    equ 0x53        ; byte
+CDS_IFS         equ 0x54        ; dword: IFS ドライバ
+CDS_UNKNOWN4    equ 0x58
+CDS_ENTSIZE     equ 0x58        ; 88 バイト
+
+CDSF_NETWORK    equ 0x8000
+CDSF_PHYSICAL   equ 0x4000      ; 実在するドライブ
+CDSF_JOIN       equ 0x2000
+CDSF_SUBST      equ 0x1000
+
+MAX_DRIVES      equ 26          ; A: - Z:
+DEFAULT_LASTDRIVE equ 5         ; 既定は E: まで (MS-DOS と同じ)
+
+; --- デバイスドライバのヘッダ (18 バイト) ------------------------------------
+;
+; NUL → CON → AUX → PRN → CLOCK$ → ブロックデバイス という順に連鎖する。
+; CONFIG.SYS の DEVICE= で読み込んだドライバは NUL の直後に差し込まれ、
+; 先に見つかったほうが優先される (だから ANSI.SYS が CON を乗っ取れる)。
+DEV_NEXT        equ 0x00        ; dword: 次のデバイス (FFFF:FFFF = 最後)
+DEV_ATTR        equ 0x04        ; word: 属性
+DEV_STRATEGY    equ 0x06        ; word: 要求を受け取る入口のオフセット
+DEV_INTERRUPT   equ 0x08        ; word: 実際に処理する入口のオフセット
+DEV_NAME        equ 0x0A        ; 8 バイト: 文字デバイスの名前
+                                ;   ブロックデバイスは 1 バイト目がユニット数
+DEV_HDRSIZE     equ 18
+
+; デバイス属性
+DEVA_CHAR       equ 0x8000      ; 1 = 文字デバイス
+DEVA_IOCTL      equ 0x4000      ; IOCTL に対応
+DEVA_OUTBUSY    equ 0x2000      ; 「話中まで出力」に対応 (文字)
+DEVA_NONIBM     equ 0x2000      ; IBM 以外の形式 (ブロック)
+DEVA_OPENCLOSE  equ 0x0800      ; オープン/クローズ/リムーバブルに対応
+DEVA_GENIOCTL   equ 0x0040      ; 汎用 IOCTL に対応
+DEVA_CLOCK      equ 0x0008      ; CLOCK$ である
+DEVA_NUL        equ 0x0004      ; NUL である
+DEVA_STDOUT     equ 0x0002      ; 標準出力である
+DEVA_STDIN      equ 0x0001      ; 標準入力である
+
+; --- デバイスドライバの要求ヘッダ -------------------------------------------
+;
+; DOS はドライバを「STRATEGY で要求の場所を渡し、INTERRUPT で実行させる」
+; という 2 段階で呼ぶ。大昔のマルチタスク構想の名残で、実際には
+; STRATEGY が場所を覚えて INTERRUPT がすぐ処理する。
+REQ_LENGTH      equ 0x00        ; byte: この要求ヘッダの長さ
+REQ_UNIT        equ 0x01        ; byte: ユニット番号 (ブロックデバイス)
+REQ_CMD         equ 0x02        ; byte: コマンド
+REQ_STATUS      equ 0x03        ; word: 結果
+REQ_RESERVED    equ 0x05        ; 8 バイト
+; コマンドごとの続き (読み書きの場合)
+REQ_MEDIA       equ 0x0D        ; byte: メディアディスクリプタ
+REQ_BUFFER      equ 0x0E        ; dword: 転送先/元
+REQ_COUNT       equ 0x12        ; word: セクタ数 / バイト数
+REQ_START       equ 0x14        ; word: 開始セクタ
+REQ_VOLID       equ 0x16        ; dword
+REQ_STARTL      equ 0x1A        ; dword: 32bit の開始セクタ (65535 超のとき)
+; INIT (コマンド 0) の場合
+REQ_INIT_UNITS  equ 0x0D        ; byte: 対応したユニット数
+REQ_INIT_END    equ 0x0E        ; dword: 常駐部分の末尾
+REQ_INIT_BPB    equ 0x12        ; dword: BPB 配列へのポインタ
+REQ_INIT_DRIVE  equ 0x16        ; byte: 最初のドライブ番号
+
+; デバイスドライバのコマンド
+DEVC_INIT       equ 0
+DEVC_MEDIACHECK equ 1
+DEVC_BUILDBPB   equ 2
+DEVC_IOCTLREAD  equ 3
+DEVC_READ       equ 4
+DEVC_PEEK       equ 5           ; 破壊しない読み取り
+DEVC_INSTATUS   equ 6
+DEVC_INFLUSH    equ 7
+DEVC_WRITE      equ 8
+DEVC_WRITEVFY   equ 9
+DEVC_OUTSTATUS  equ 10
+DEVC_OUTFLUSH   equ 11
+DEVC_IOCTLWRITE equ 12
+DEVC_OPEN       equ 13
+DEVC_CLOSE      equ 14
+DEVC_REMOVABLE  equ 15
+DEVC_OUTBUSY    equ 16
+
+; 要求の結果 (REQ_STATUS)
+DEVS_DONE       equ 0x0100      ; 完了
+DEVS_BUSY       equ 0x0200
+DEVS_ERROR      equ 0x8000
+DEVE_WRITEPROT  equ 0x00
+DEVE_UNKNOWNUNIT equ 0x01
+DEVE_NOTREADY   equ 0x02
+DEVE_UNKNOWNCMD equ 0x03
+DEVE_CRC        equ 0x04
+DEVE_SEEK       equ 0x06
+DEVE_UNKNOWNMEDIA equ 0x07
+DEVE_SECTORNOTFOUND equ 0x08
+DEVE_WRITEFAULT equ 0x0A
+DEVE_READFAULT  equ 0x0B
+DEVE_GENERAL    equ 0x0C
+
+; --- List of Lists (AH=52h が ES:BX で返す構造体) ---------------------------
+;
+; DOS の内部構造への入口。ここから DPB 連鎖・SFT 連鎖・デバイス連鎖・
+; CDS 配列に辿り着ける。手前 2 バイトに最初の MCB があるのは昔からの約束。
+LOL_FIRST_MCB   equ -2          ; word: 最初の MCB のセグメント
+LOL_FIRST_DPB   equ 0x00        ; dword
+LOL_FIRST_SFT   equ 0x04        ; dword
+LOL_CLOCK       equ 0x08        ; dword: CLOCK$ デバイス
+LOL_CON         equ 0x0C        ; dword: CON デバイス
+LOL_MAXSECTOR   equ 0x10        ; word: 最大セクタサイズ
+LOL_BUFFERS     equ 0x12        ; dword: ディスクバッファ連鎖
+LOL_CDS         equ 0x16        ; dword: CDS 配列
+LOL_FCBTABLE    equ 0x1A        ; dword: FCB テーブル
+LOL_FCBKEEP     equ 0x1E        ; word: 保護される FCB の数
+LOL_NUMBLOCK    equ 0x20        ; byte: ブロックデバイスの数
+LOL_LASTDRIVE   equ 0x21        ; byte: LASTDRIVE
+LOL_NULDEV      equ 0x22        ; 18 バイト: NUL デバイスのヘッダそのもの
+LOL_NUMJOIN     equ 0x34        ; byte: JOIN されたドライブ数
+LOL_SIZE        equ 0x35
+
+; --- ディスクバッファ (BUFFERS= の実体) -------------------------------------
+BUF_NEXT        equ 0x00        ; dword: 次のバッファ
+BUF_DRIVE       equ 0x04        ; byte: ドライブ番号 (FFh = 未使用)
+BUF_FLAGS       equ 0x05        ; byte
+BUF_SECTOR      equ 0x06        ; dword: このバッファに載っているセクタ
+BUF_COPIES      equ 0x0A        ; byte: 書き戻す FAT のコピー数
+BUF_OFFSET      equ 0x0B        ; word: FAT のコピー間のセクタ数
+BUF_DPB         equ 0x0D        ; dword
+BUF_USE         equ 0x11        ; word
+BUF_DATA        equ 0x14        ; ここから 512 バイト
+BUF_HDRSIZE     equ 0x14
+DEFAULT_BUFFERS equ 8
 
 ; --- DOS のエラーコード (AX に入れて CF=1 で返す) ---------------------------
 ERR_NONE        equ 0

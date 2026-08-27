@@ -391,6 +391,7 @@ dir_chdir:
         mov     di, cur_dir_path
         call    .copy_z
         pop     si
+        call    cds_sync                ; CDS にも書き戻す
         xor     ax, ax
         clc
         jmp     .out

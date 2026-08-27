@@ -576,7 +576,8 @@ f_44:
         mov     bx, [u_bx]
         call    jft_get
         jc      .bad_handle
-        cmp     byte [si + SFT_DEVICE], SFT_DEV_FILE
+        call    sft_devkind
+        cmp     al, SFT_DEV_FILE
         je      .is_file
 
         ; 文字デバイス: bit7 = デバイス, bit0/1 = 標準入出力, bit4 = 特殊
@@ -610,7 +611,7 @@ f_45:
         pop     ax
         jc      .too_many
         call    jft_set
-        inc     byte [si + SFT_REFCNT]
+        inc     word [si + SFT_REFCNT]
         mov     [u_ax], bx
         jmp     int21_ok
 .bad:
@@ -640,7 +641,7 @@ f_46:
         mov     al, [.srcsft]
         call    jft_set
         call    sft_addr
-        inc     byte [si + SFT_REFCNT]
+        inc     word [si + SFT_REFCNT]
         jmp     int21_ok
 .srcsft: db 0
 
@@ -829,12 +830,7 @@ f_57:
         push    ds
         pop     es
         mov     ax, [si + SFT_DIRSEC]
-        mov     [dir_cur_lba], ax
-        push    bx
-        mov     bx, dir_buf
-        mov     cx, 1
-        call    disk_read
-        pop     bx
+        call    dir_load_lba
         pop     es
         jc      .bad
 
@@ -1165,8 +1161,8 @@ f_68:
         mov     bx, [u_bx]
         call    jft_get
         jc      .bad
-        test    byte [si + SFT_FLAGS], SFT_FLAG_DIRTY
-        jz      .clean
+        call    sft_is_dirty
+        jnz     .clean
         call    file_update_dirent
         jc      .io
         call    disk_flush_fat
@@ -1658,14 +1654,3 @@ last_error:     dw 0
 path_buf:       times 128 db 0
 path_buf2:      times 128 db 0
 
-; --- List of Lists (AH=52h が返す構造体) -----------------------------------
-; 手前 2 バイトに最初の MCB のセグメントを置くのが約束。
-                dw 0                    ; -4: 予約
-lol_first_mcb:  dw 0                    ; -2: 最初の MCB のセグメント
-dos_lol:
-                dd 0                    ; +0: 最初の DPB
-                dd 0                    ; +4: 最初の SFT
-                dd 0                    ; +8: CLOCK$ デバイス
-                dd 0                    ; +C: CON デバイス
-                dw SECTOR_SIZE          ; +10: 最大セクタサイズ
-                times 16 db 0

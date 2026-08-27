@@ -29,8 +29,13 @@ kernel_entry:
         cli
         cld
 
-        push    dx                      ; DL = ブートドライブ番号
-
+        ; ここではスタックを一切使わない。
+        ;
+        ; 呼び出し元 (Stage2) のスタックは 0x7C00 の直下にあり、これから
+        ; 書き込む先 (0x600 から) はカーネルが大きくなるとそこへ届く。
+        ; ブートドライブ番号を push で預けると、コピーの途中で自分の
+        ; イメージに踏み潰されて、でたらめなドライブ番号で起動しようと
+        ; することになる。DL は movsb が触らないのでそのまま持ち回る。
         mov     ax, LOAD_SEG
         mov     ds, ax
         mov     ax, KERNEL_SEG
@@ -38,9 +43,8 @@ kernel_entry:
         xor     si, si
         xor     di, di
         mov     cx, kernel_end
-        rep     movsb
+        rep     movsb                   ; DL は保たれる
 
-        pop     dx
         jmp     KERNEL_SEG:kernel_main
 
 ; ============================================================================
@@ -66,12 +70,28 @@ kernel_main:
         ; --- 割り込みベクタを立てる ---
         call    install_vectors
 
+        ; --- デバイスドライバの連鎖を立てる ---
+        ; ディスクを触る前に済ませておく。ブロックデバイスも連鎖の一員で、
+        ; 以降のセクタ入出力はすべてここを通る。
+        call    dev_init
+
+        ; --- ディスクバッファ (BUFFERS=) ---
+        mov     al, DEFAULT_BUFFERS
+        call    buf_init
+
         ; --- ディスク (BPB の取り込みと FAT の読み込み) ---
         call    disk_init
         jc      .disk_fail
 
+        ; --- ドライブごとのカレントディレクトリ (CDS) ---
+        mov     al, DEFAULT_LASTDRIVE
+        call    cds_init
+
         ; --- ファイルハンドルの土台 ---
         call    sft_init
+
+        ; --- List of Lists の各ポインタを実体に向ける ---
+        call    lol_init
 
         ; --- MCB アリーナはカーネルの直後から 640KB まで ---
         ; カーネルの大きさをパラグラフに切り上げて自分のセグメントに足す。
@@ -479,6 +499,9 @@ int26_handler:
 %include "con.inc"
 %include "time.inc"
 %include "disk.inc"
+%include "buffer.inc"
+%include "cds.inc"
+%include "device.inc"
 %include "fat12.inc"
 %include "mem.inc"
 %include "file.inc"

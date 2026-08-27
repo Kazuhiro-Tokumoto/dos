@@ -260,20 +260,32 @@ dir_load:
         push    ax
         push    bx
         push    cx
+        push    dx
+        push    si
+        push    di
         push    es
 
         call    dir_map_sector
         jc      .fail
         mov     [dir_cur_lba], ax
 
-        push    ds
-        pop     es
-        mov     bx, dir_buf
-        mov     cx, 1
-        call    disk_read
+        ; ディスクバッファ越しに読む。同じディレクトリを何度も辿るので、
+        ; ここが素通しだとセクタを読み直す回数が跳ね上がる。
+        mov     dl, [cur_drive]
+        call    buf_get
         jc      .fail
 
+        push    ds
         pop     es
+        add     si, BUF_DATA
+        mov     di, dir_buf
+        mov     cx, SECTOR_SIZE
+        rep     movsb
+
+        pop     es
+        pop     di
+        pop     si
+        pop     dx
         pop     cx
         pop     bx
         pop     ax
@@ -281,8 +293,58 @@ dir_load:
         ret
 .fail:
         pop     es
+        pop     di
+        pop     si
+        pop     dx
         pop     cx
         pop     bx
+        pop     ax
+        stc
+        ret
+
+; ---------------------------------------------------------------------------
+; dir_load_lba - LBA を直接指定してディレクトリセクタを dir_buf に載せる
+;   入力: AX = LBA
+;   出力: CF=1 なら失敗。[dir_cur_lba] に LBA が入る
+;
+; ディレクトリエントリの場所を SFT に控えてある場合に使う。必ず
+; ディスクバッファ越しに読むこと。素通しで読むと、まだ書き戻していない
+; 新しいエントリを古い内容で上書きしてしまう。
+; ---------------------------------------------------------------------------
+dir_load_lba:
+        push    ax
+        push    cx
+        push    dx
+        push    si
+        push    di
+        push    es
+
+        mov     [dir_cur_lba], ax
+        mov     dl, [cur_drive]
+        call    buf_get
+        jc      .fail
+
+        push    ds
+        pop     es
+        add     si, BUF_DATA
+        mov     di, dir_buf
+        mov     cx, SECTOR_SIZE
+        rep     movsb
+
+        pop     es
+        pop     di
+        pop     si
+        pop     dx
+        pop     cx
+        pop     ax
+        clc
+        ret
+.fail:
+        pop     es
+        pop     di
+        pop     si
+        pop     dx
+        pop     cx
         pop     ax
         stc
         ret
@@ -295,17 +357,48 @@ dir_store:
         push    ax
         push    bx
         push    cx
+        push    dx
+        push    si
+        push    di
         push    es
+
         push    ds
         pop     es
         mov     ax, [dir_cur_lba]
-        mov     bx, dir_buf
-        mov     cx, 1
-        call    disk_write
+        mov     dl, [cur_drive]
+        call    buf_get
+        jc      .fail
+
+        ; バッファの中身を書き換えて「汚れている」印を付ける。
+        ; 実際にディスクへ戻るのは buf_flush のとき (クローズ、
+        ; AH=0Dh のディスクリセット、プログラム終了)。
+        mov     di, si
+        add     di, BUF_DATA
+        mov     si, dir_buf
+        mov     cx, SECTOR_SIZE
+        rep     movsb
+        mov     si, di
+        sub     si, BUF_DATA + SECTOR_SIZE
+        call    buf_dirty
+
         pop     es
+        pop     di
+        pop     si
+        pop     dx
         pop     cx
         pop     bx
         pop     ax
+        clc
+        ret
+.fail:
+        pop     es
+        pop     di
+        pop     si
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        stc
         ret
 
 ; ---------------------------------------------------------------------------

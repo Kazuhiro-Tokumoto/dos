@@ -248,7 +248,7 @@ fcb_sft:
         cmp     al, SFT_ENTRIES
         jae     .bad
         call    sft_addr
-        cmp     byte [si + SFT_REFCNT], 0
+        cmp     word [si + SFT_REFCNT], 0
         je      .bad
         pop     di
         pop     es
@@ -295,10 +295,7 @@ fcb_fill_open:
         push    ds
         pop     es
         mov     ax, [si + SFT_DIRSEC]
-        mov     [dir_cur_lba], ax
-        mov     bx, dir_buf
-        mov     cx, 1
-        call    disk_read
+        call    dir_load_lba
         pop     es
         jc      .no_stamp
         push    si
@@ -351,10 +348,8 @@ fcb_open_by_name:
         jc      .not_found
 
         call    file_open.fill_from_dirent
-        mov     byte [si + SFT_MODE], OPEN_RDWR
-        mov     byte [si + SFT_DEVICE], SFT_DEV_FILE
-        mov     ax, [cur_dir_clus]
-        mov     [si + SFT_DIRCLUS], ax
+        mov     word [si + SFT_MODE], OPEN_RDWR
+        call    sft_bind_file
 
         ; SFT 番号を求め直す
         mov     ax, si
@@ -409,12 +404,12 @@ f_10:
         jc      .fail
 
         ; 書き換えられていたらディレクトリエントリを更新する
-        test    byte [si + SFT_FLAGS], SFT_FLAG_DIRTY
-        jz      .no_flush
+        call    sft_is_dirty
+        jnz     .no_flush
         call    file_update_dirent
         call    disk_flush_fat
 .no_flush:
-        mov     byte [si + SFT_REFCNT], 0       ; SFT を返す
+        mov     word [si + SFT_REFCNT], 0       ; SFT を返す
 
         call    fcb_load
         mov     byte [es:di + FCB_MAGIC], 0
@@ -937,7 +932,7 @@ fcb_block_common:
         mov     eax, [.pos]
         mov     [si + SFT_POS], eax
         mov     [si + SFT_SIZE], eax
-        or      byte [si + SFT_FLAGS], SFT_FLAG_DIRTY
+        call    sft_mark_dirty
         mov     byte [.status], FCB_OK
         jmp     .finish
 

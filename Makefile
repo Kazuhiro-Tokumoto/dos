@@ -36,6 +36,7 @@ SHELL_COM := $(BUILD)/command.com
 # ディスクに入れるテストプログラム
 PROGS := $(BUILD)/hello.com $(BUILD)/hello.exe $(BUILD)/dostest.com \
          $(BUILD)/fcbtest.com $(BUILD)/tsrtest.com $(BUILD)/ovltest.com \
+         $(BUILD)/dosint.com \
          $(BUILD)/ovl.ovl
 
 KDEPS := kernel/io.asm $(wildcard $(INCDIR)/*.inc)
@@ -94,6 +95,7 @@ define make_image
 	$(MCOPY) -i $(1) -o $(BUILD)/fcbtest.com ::FCBTEST.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/tsrtest.com ::TSRTEST.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/ovltest.com ::OVLTEST.COM
+	$(MCOPY) -i $(1) -o $(BUILD)/dosint.com ::DOSINT.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/ovl.ovl ::OVL.OVL
 	$(MCOPY) -i $(1) -o tests/readme.txt ::README.TXT
 	$(MCOPY) -i $(1) -o $(3) ::AUTOEXEC.BAT

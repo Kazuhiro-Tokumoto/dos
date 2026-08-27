@@ -32,8 +32,8 @@ REQUIRED = [
     ("OVERLAY-RELOC: PASS", "AH=4Bh AL=3 オーバーレイのリロケーション"),
 ]
 
-# DOSTEST と FCBTEST の 2 本が、それぞれ集計行と終了の目印を出す。
-EXPECTED_SUITES = 2
+# DOSINT / FCBTEST / DOSTEST の 3 本が、それぞれ集計行と終了の目印を出す。
+EXPECTED_SUITES = 3
 
 
 def run(image, timeout, qemu, keep_log):

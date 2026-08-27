@@ -21,36 +21,130 @@
 sft_init:
         push    ax
         push    cx
+        push    dx
         push    di
+        push    si
         push    es
 
         push    ds
         pop     es
+
+        ; テーブルのヘッダ。List of Lists の +04 がここを指す。
+        mov     word [sft_header + SFTH_NEXT], 0xFFFF
+        mov     word [sft_header + SFTH_NEXT + 2], 0xFFFF
+        mov     word [sft_header + SFTH_COUNT], SFT_ENTRIES
+
         mov     di, sft_table
         mov     cx, SFT_ENTRIES * SFT_ENTSIZE
         xor     al, al
         rep     stosb                   ; refcnt = 0 で全部空き
 
-        ; SFT 0 = CON, SFT 1 = AUX, SFT 2 = PRN
-        mov     di, sft_table
-        mov     byte [di + SFT_REFCNT], 1
-        mov     byte [di + SFT_DEVICE], SFT_DEV_CON
-        mov     byte [di + SFT_MODE], OPEN_RDWR
+        ; SFT 0 = CON (標準入力・標準出力・標準エラーが共有する)
+        xor     al, al
+        call    sft_addr
+        mov     word [si + SFT_MODE], OPEN_RDWR
+        mov     di, dev_con
+        mov     dx, SFTI_CHAR | SFTI_IOCTL | SFTI_STDIN | SFTI_STDOUT | SFTI_CLEAN
+        call    sft_bind_char
 
-        add     di, SFT_ENTSIZE
-        mov     byte [di + SFT_REFCNT], 1
-        mov     byte [di + SFT_DEVICE], SFT_DEV_AUX
-        mov     byte [di + SFT_MODE], OPEN_RDWR
+        ; SFT 1 = AUX
+        mov     al, 1
+        call    sft_addr
+        mov     word [si + SFT_MODE], OPEN_RDWR
+        mov     di, dev_aux
+        mov     dx, SFTI_CHAR | SFTI_CLEAN
+        call    sft_bind_char
 
-        add     di, SFT_ENTSIZE
-        mov     byte [di + SFT_REFCNT], 1
-        mov     byte [di + SFT_DEVICE], SFT_DEV_PRN
-        mov     byte [di + SFT_MODE], OPEN_WRITE
+        ; SFT 2 = PRN
+        mov     al, 2
+        call    sft_addr
+        mov     word [si + SFT_MODE], OPEN_WRITE
+        mov     di, dev_prn
+        mov     dx, SFTI_CHAR | SFTI_CLEAN
+        call    sft_bind_char
 
         pop     es
+        pop     si
         pop     di
+        pop     dx
         pop     cx
         pop     ax
+        ret
+
+; ---------------------------------------------------------------------------
+; sft_bind_char - SFT を文字デバイスに結びつける
+;   入力: SI = SFT, DI = デバイスヘッダのオフセット, DX = デバイス情報のビット
+;
+; どの文字デバイスかは SFT_DEVPTR が指す先で見分ける。DOS も同じで、
+; 「CON かどうか」は種類コードではなくポインタの一致で判定する。
+; だから DEVICE= で CON を差し替えても筋が通る。
+; ---------------------------------------------------------------------------
+sft_bind_char:
+        push    ax
+        mov     word [si + SFT_REFCNT], 1
+        mov     [si + SFT_DEVINFO], dx
+        mov     [si + SFT_DEVPTR], di
+        mov     ax, cs
+        mov     [si + SFT_DEVPTR + 2], ax
+        pop     ax
+        ret
+
+; ---------------------------------------------------------------------------
+; sft_devkind - この SFT がどのデバイスを指しているかを調べる
+;   入力: SI = SFT
+;   出力: AL = SFT_DEV_xxx
+; ---------------------------------------------------------------------------
+sft_devkind:
+        push    bx
+        test    word [si + SFT_DEVINFO], SFTI_CHAR
+        jz      .file
+        mov     bx, [si + SFT_DEVPTR]
+        cmp     bx, dev_con
+        je      .con
+        cmp     bx, dev_aux
+        je      .aux
+        cmp     bx, dev_prn
+        je      .prn
+        cmp     bx, dev_clock
+        je      .clock
+        mov     al, SFT_DEV_NUL         ; 知らない文字デバイスは NUL 扱い
+        jmp     .out
+.con:
+        mov     al, SFT_DEV_CON
+        jmp     .out
+.aux:
+        mov     al, SFT_DEV_AUX
+        jmp     .out
+.prn:
+        mov     al, SFT_DEV_PRN
+        jmp     .out
+.clock:
+        mov     al, SFT_DEV_CLOCK
+        jmp     .out
+.file:
+        mov     al, SFT_DEV_FILE
+.out:
+        pop     bx
+        ret
+
+; ---------------------------------------------------------------------------
+; 書き換えの印
+;
+; DOS はデバイス情報語の bit6 を「まだ書き込まれていない」として使う。
+; 立っている = きれい、倒れている = 書き換え済み、という向きなので
+; 読み違えないよう関数にしてある。
+; ---------------------------------------------------------------------------
+sft_mark_dirty:
+        and     word [si + SFT_DEVINFO], ~SFTI_CLEAN & 0xFFFF
+        ret
+
+sft_mark_clean:
+        or      word [si + SFT_DEVINFO], SFTI_CLEAN
+        ret
+
+; ZF=1 なら書き換えられている
+sft_is_dirty:
+        test    word [si + SFT_DEVINFO], SFTI_CLEAN
         ret
 
 ; ---------------------------------------------------------------------------
@@ -62,7 +156,7 @@ sft_addr:
         push    ax
         push    bx
         mov     bl, SFT_ENTSIZE
-        mul     bl                      ; AX = AL * 48
+        mul     bl                      ; AX = AL * 59
         mov     si, sft_table
         add     si, ax
         pop     bx
@@ -80,7 +174,7 @@ sft_alloc:
         mov     cx, SFT_ENTRIES
 .loop:
         call    sft_addr
-        cmp     byte [si + SFT_REFCNT], 0
+        cmp     word [si + SFT_REFCNT], 0
         je      .found
         inc     al
         loop    .loop
@@ -101,7 +195,7 @@ sft_alloc:
         pop     es
         pop     di
         pop     ax
-        mov     byte [si + SFT_REFCNT], 1
+        mov     word [si + SFT_REFCNT], 1
         clc
         pop     cx
         ret
@@ -123,7 +217,7 @@ jft_get:
         cmp     al, SFT_ENTRIES
         jae     .bad
         call    sft_addr
-        cmp     byte [si + SFT_REFCNT], 0
+        cmp     word [si + SFT_REFCNT], 0
         je      .bad
         pop     es
         clc
@@ -305,22 +399,20 @@ file_open:
 
         call    .fill_from_dirent
 
-        mov     al, [.mode]
-        mov     [si + SFT_MODE], al
-        mov     byte [si + SFT_DEVICE], SFT_DEV_FILE
-        mov     ax, [.dirclus]
-        mov     [si + SFT_DIRCLUS], ax
+        movzx   ax, byte [.mode]
+        mov     [si + SFT_MODE], ax
+        call    sft_bind_file
         jmp     .bind
 
 .device:
-        ; AL にデバイス番号が入っている
+        ; AL にデバイスの種類が入っている
         mov     [.dev], al
         call    sft_alloc
         jc      .too_many
         mov     al, [.dev]
-        mov     [si + SFT_DEVICE], al
-        mov     al, [.mode]
-        mov     [si + SFT_MODE], al
+        call    sft_bind_kind
+        movzx   ax, byte [.mode]
+        mov     [si + SFT_MODE], ax
 
 .bind:
         ; SFT 番号を求め直してハンドルに結びつける
@@ -342,7 +434,7 @@ file_open:
         jmp     .out
 
 .too_many_h:
-        mov     byte [si + SFT_REFCNT], 0       ; 確保した SFT を戻す
+        mov     word [si + SFT_REFCNT], 0       ; 確保した SFT を戻す
 .too_many:
         mov     ax, ERR_TOO_MANY_FILES
         stc
@@ -368,14 +460,17 @@ file_open:
         push    si
         push    di
 
+        ; 8.3 名は SFT の +20h に入る。DOS 4 以降のレイアウトでは先頭が
+        ; 参照カウントなので、そこへ名前を書くとハンドルが解放されなくなる。
         push    si
         push    di
-        mov     cx, 11
         push    es
         push    ds
         pop     es
-        xchg    si, di                  ; SI = エントリ, DI = SFT
-        rep     movsb                   ; 8.3 名を写す
+        xchg    si, di                  ; SI = ディレクトリエントリ, DI = SFT
+        add     di, SFT_NAME
+        mov     cx, 11
+        rep     movsb
         pop     es
         pop     di
         pop     si
@@ -393,6 +488,7 @@ file_open:
         mov     word [si + SFT_CIDX], 0xFFFF    ; キャッシュ無効
         mov     ax, [dir_cur_lba]
         mov     [si + SFT_DIRSEC], ax
+        mov     word [si + SFT_DIRSEC + 2], 0
 
         ; dir_buf の何番目のエントリかを覚えておく (閉じるとき書き戻す)
         mov     ax, di
@@ -494,11 +590,9 @@ file_create:
         jc      .too_many
 
         call    file_open.fill_from_dirent
-        mov     byte [si + SFT_MODE], OPEN_RDWR
-        mov     byte [si + SFT_DEVICE], SFT_DEV_FILE
-        mov     ax, [.dirclus]
-        mov     [si + SFT_DIRCLUS], ax
-        mov     byte [si + SFT_FLAGS], SFT_FLAG_DIRTY
+        mov     word [si + SFT_MODE], OPEN_RDWR
+        call    sft_bind_file
+        call    sft_mark_dirty
         jmp     file_open.bind
 
 .as_device:
@@ -506,8 +600,8 @@ file_create:
         call    sft_alloc
         jc      .too_many
         mov     al, [.dev]
-        mov     [si + SFT_DEVICE], al
-        mov     byte [si + SFT_MODE], OPEN_RDWR
+        call    sft_bind_kind
+        mov     word [si + SFT_MODE], OPEN_RDWR
         jmp     file_open.bind
 
 .too_many:
@@ -565,8 +659,8 @@ file_close:
         jc      .bad
 
         ; 書き換えられていたらディレクトリエントリを更新する
-        test    byte [si + SFT_FLAGS], SFT_FLAG_DIRTY
-        jz      .no_flush
+        call    sft_is_dirty
+        jnz     .no_flush
         call    file_update_dirent
         jc      .io_error
         call    disk_flush_fat
@@ -581,9 +675,10 @@ file_close:
 
         ; 参照が 0 になったら SFT を解放する。CON/AUX/PRN の SFT は
         ; 起動時から refcnt=1 で押さえてあるので、ここで消えることはない。
-        cmp     byte [si + SFT_DEVICE], SFT_DEV_FILE
+        call    sft_devkind
+        cmp     al, SFT_DEV_FILE
         jne     .done
-        dec     byte [si + SFT_REFCNT]
+        dec     word [si + SFT_REFCNT]
 
 .done:
         xor     ax, ax
@@ -618,12 +713,9 @@ file_update_dirent:
         push    ds
         pop     es
 
-        ; そのエントリのあるセクタを読み直す
+        ; そのエントリのあるセクタを読み直す (必ずバッファ越しに)
         mov     ax, [si + SFT_DIRSEC]
-        mov     [dir_cur_lba], ax
-        mov     bx, dir_buf
-        mov     cx, 1
-        call    disk_read
+        call    dir_load_lba
         jc      .fail
 
         ; エントリ番号からオフセットを求める
@@ -648,7 +740,7 @@ file_update_dirent:
         call    dir_store
         jc      .fail
 
-        and     byte [si + SFT_FLAGS], ~SFT_FLAG_DIRTY
+        call    sft_mark_clean
         clc
         jmp     .out
 .fail:
@@ -688,7 +780,7 @@ file_cluster_at:
         call    fat_alloc
         jc      .full
         mov     [si + SFT_CLUSTER], ax
-        mov     byte [si + SFT_FLAGS], SFT_FLAG_DIRTY
+        call    sft_mark_dirty
 
 .have_first:
         ; キャッシュが使えるか (探している位置がキャッシュ以降なら続きから)
@@ -727,7 +819,7 @@ file_cluster_at:
         mov     ax, bx
         call    fat_set                 ; 直前のクラスタ → 新しいクラスタ
         pop     ax
-        mov     byte [si + SFT_FLAGS], SFT_FLAG_DIRTY
+        call    sft_mark_dirty
         inc     cx
         jmp     .walk
 
@@ -783,7 +875,8 @@ file_read:
         jc      .bad_handle
 
 .have_sft:
-        cmp     byte [si + SFT_DEVICE], SFT_DEV_FILE
+        call    sft_devkind
+        cmp     al, SFT_DEV_FILE
         jne     .device
 
         ; 残りバイト数 = サイズ - 位置
@@ -830,16 +923,12 @@ file_read:
         mov     [.soff], ax
         pop     ax
 
-        ; セクタを読む
-        push    bx
-        push    es
-        push    ds
-        pop     es
-        mov     bx, sector_buf
-        mov     cx, 1
-        call    disk_read
-        pop     es
-        pop     bx
+        ; セクタをバッファに載せる
+        push    si
+        mov     dl, [cur_drive]
+        call    buf_get
+        mov     [.bufptr], si
+        pop     si
         jc      .io_error
 
         ; このセクタから取れるバイト数
@@ -852,10 +941,11 @@ file_read:
 .chunk_ok:
         mov     [.chunk], ax
 
-        ; sector_buf + soff から ES:DI へ写す
+        ; バッファの中身から ES:DI へ写す
         push    cx
         push    si
-        mov     si, sector_buf
+        mov     si, [.bufptr]
+        add     si, BUF_DATA
         add     si, [.soff]
         mov     cx, [.chunk]
         rep     movsb                   ; DS:SI -> ES:DI, DI が進む
@@ -880,7 +970,8 @@ file_read:
 
 .device:
         ; いまのところ CON からの読み取りだけ扱う
-        cmp     byte [si + SFT_DEVICE], SFT_DEV_CON
+        call    sft_devkind
+        cmp     al, SFT_DEV_CON
         jne     .eof
         call    con_read_block
         clc
@@ -905,6 +996,7 @@ file_read:
 .coff:   dw 0
 .soff:   dw 0
 .chunk:  dw 0
+.bufptr: dw 0
 
 ; ---------------------------------------------------------------------------
 ; con_read_block - CON から 1 行読んで ES:DI へ入れる (AH=3Fh のハンドル 0)
@@ -996,7 +1088,8 @@ file_write:
         jc      .bad_handle
 
 .have_sft:
-        cmp     byte [si + SFT_DEVICE], SFT_DEV_FILE
+        call    sft_devkind
+        cmp     al, SFT_DEV_FILE
         jne     .device
 
         test    cx, cx
@@ -1045,21 +1138,15 @@ file_write:
 .chunk_ok:
         mov     [.chunk], ax
 
-        ; セクタ全体を置き換えるのでなければ、読んでから書き換える。
-        ; そうしないと同じセクタにある他のデータを消してしまう。
-        cmp     word [.chunk], SECTOR_SIZE
-        je      .no_readback
-        push    bx
-        push    es
-        push    ds
-        pop     es
+        ; セクタをバッファに載せる。セクタの一部だけを書き換える場合、
+        ; 残りは元の内容でなければならないので、必ず先に読んでおく。
+        push    si
         mov     ax, [.lba]
-        mov     bx, sector_buf
-        mov     cx, 1
-        call    disk_read               ; 失敗しても続ける (新規クラスタなら未定義)
-        pop     es
-        pop     bx
-.no_readback:
+        mov     dl, [cur_drive]
+        call    buf_get
+        mov     [.bufptr], si
+        pop     si
+        jc      .io_error
 
         ; ユーザのデータ (ES:DI) を sector_buf + soff へ写す。
         ; movsb は DS:SI -> ES:DI なので、セグメントを入れ替えてから使う。
@@ -1071,7 +1158,8 @@ file_write:
 
         mov     cx, [.chunk]            ; DS はまだカーネルなので変数が読める
         mov     si, di                  ; SI = ユーザバッファのオフセット
-        mov     di, sector_buf
+        mov     di, [.bufptr]
+        add     di, BUF_DATA
         add     di, [.soff]
         mov     ax, es                  ; AX = ユーザのセグメント
         push    ds
@@ -1085,18 +1173,12 @@ file_write:
         pop     es
         pop     ds
 
-        ; 書き戻す
-        push    bx
-        push    es
-        push    ds
-        pop     es
-        mov     ax, [.lba]
-        mov     bx, sector_buf
-        mov     cx, 1
-        call    disk_write
-        pop     es
-        pop     bx
-        jc      .io_error
+        ; バッファに書いたので汚れの印を付ける。ディスクへ戻るのは
+        ; buf_flush のとき (クローズやディスクリセット)。
+        push    si
+        mov     si, [.bufptr]
+        call    buf_dirty
+        pop     si
 
         movzx   eax, word [.chunk]
         add     [si + SFT_POS], eax
@@ -1110,7 +1192,7 @@ file_write:
         jbe     .no_extend
         mov     [si + SFT_SIZE], eax
 .no_extend:
-        or      byte [si + SFT_FLAGS], SFT_FLAG_DIRTY
+        call    sft_mark_dirty
         jmp     .loop
 
 .done:
@@ -1122,13 +1204,13 @@ file_write:
         ; 現在位置でファイルを切る
         mov     eax, [si + SFT_POS]
         mov     [si + SFT_SIZE], eax
-        or      byte [si + SFT_FLAGS], SFT_FLAG_DIRTY
+        call    sft_mark_dirty
         xor     ax, ax
         clc
         jmp     .out
 
 .device:
-        mov     al, [si + SFT_DEVICE]
+        call    sft_devkind
         cmp     al, SFT_DEV_NUL
         je      .nul
         cmp     al, SFT_DEV_CON
@@ -1177,6 +1259,7 @@ file_write:
 .soff:   dw 0
 .chunk:  dw 0
 .lba:    dw 0
+.bufptr: dw 0
 
 ; ---------------------------------------------------------------------------
 ; file_seek - 読み書き位置を移動する
@@ -1289,5 +1372,67 @@ file_delete:
         pop     bx
         ret
 
+; ---------------------------------------------------------------------------
+; sft_bind_file - SFT をディスク上のファイルに結びつける
+;   入力: SI = SFT
+; ---------------------------------------------------------------------------
+sft_bind_file:
+        push    ax
+        ; ブロックデバイス。下位 6bit がドライブ番号 (0 = A:)
+        mov     word [si + SFT_DEVINFO], SFTI_CLEAN
+        mov     word [si + SFT_DEVPTR], dpb
+        mov     ax, cs
+        mov     [si + SFT_DEVPTR + 2], ax
+        mov     ax, [cur_psp]
+        mov     [si + SFT_OWNER], ax
+        pop     ax
+        ret
+
+; ---------------------------------------------------------------------------
+; sft_bind_kind - SFT_DEV_xxx で指定された文字デバイスに結びつける
+;   入力: SI = SFT, AL = SFT_DEV_xxx
+; ---------------------------------------------------------------------------
+sft_bind_kind:
+        push    ax
+        push    dx
+        push    di
+        mov     dx, SFTI_CHAR | SFTI_CLEAN
+        cmp     al, SFT_DEV_CON
+        je      .con
+        cmp     al, SFT_DEV_AUX
+        je      .aux
+        cmp     al, SFT_DEV_PRN
+        je      .prn
+        cmp     al, SFT_DEV_CLOCK
+        je      .clock
+        mov     di, dev_chain_head              ; NUL
+        or      dx, SFTI_NUL
+        jmp     .bind
+.con:
+        mov     di, dev_con
+        or      dx, SFTI_IOCTL | SFTI_STDIN | SFTI_STDOUT
+        jmp     .bind
+.aux:
+        mov     di, dev_aux
+        jmp     .bind
+.prn:
+        mov     di, dev_prn
+        jmp     .bind
+.clock:
+        mov     di, dev_clock
+        or      dx, SFTI_CLOCK
+.bind:
+        call    sft_bind_char
+        mov     ax, [cur_psp]
+        mov     [si + SFT_OWNER], ax
+        pop     di
+        pop     dx
+        pop     ax
+        ret
+
 ; --- 変数 ------------------------------------------------------------------
+; テーブルのヘッダと本体。List of Lists の +04 が sft_header を指す。
+sft_header:
+                dd 0xFFFFFFFF                   ; 次のテーブルは無い
+                dw SFT_ENTRIES
 sft_table:      times SFT_ENTRIES * SFT_ENTSIZE db 0
