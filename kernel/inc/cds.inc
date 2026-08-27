@@ -62,9 +62,16 @@ cds_init:
         mov     word [di + CDS_CLUSTER], 0      ; ルート
         mov     word [di + CDS_UNKNOWN1], 0xFFFF
 
-        ; 実在するドライブだけ「物理ドライブ」の印を付け、DPB に結ぶ
-        cmp     dl, [num_drives]
-        jae     .not_present
+        ; 実在するドライブだけ「物理ドライブ」の印を付け、DPB に結ぶ。
+        ; A: しか無いのに B: を名指しされたときに正しく断れるよう、
+        ; 台数ではなくドライブ表を 1 台ずつ見る。
+        push    ax
+        push    di
+        mov     al, dl
+        call    drive_entry
+        pop     di
+        pop     ax
+        jc      .not_present
         mov     word [di + CDS_FLAGS], CDSF_PHYSICAL
         push    ax
         mov     al, dl
@@ -81,8 +88,13 @@ cds_init:
         inc     dx
         loop    .loop
 
-        ; カレントドライブは A:
-        mov     byte [cur_drive], 0
+        ; カレントドライブは起動したドライブ (disk_init が選んである)
+        mov     al, [fs_drive]
+        cmp     al, MAX_DRIVES
+        jb      .have_cur
+        xor     al, al
+.have_cur:
+        mov     [cur_drive], al
         call    cds_load
 
         pop     es
@@ -226,6 +238,7 @@ cds_set_drive:
         call    cds_sync                ; いまの場所を書き戻してから
         mov     [cur_drive], al
         call    cds_load                ; 新しいドライブの場所を載せる
+        call    drive_select            ; ファイルシステムの諸元も載せ替える
         pop     di
         clc
         ret

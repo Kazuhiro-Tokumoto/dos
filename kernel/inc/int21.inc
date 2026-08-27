@@ -266,16 +266,27 @@ f_0D:
 
 ; ===========================================================================
 ; 0Eh - ドライブ選択 → ドライブ数を返す
+;   DL = ドライブ番号 (0 = A:)
+;   出力: AL = 論理ドライブの数
+;
+; 存在しないドライブを指定されてもエラーは返さない (この呼び出しには
+; エラーの返し方が無い)。実際に使えるかどうかは、その後の呼び出しで
+; 「無効なドライブ」として返る。DOS もそうしている。
 ; ===========================================================================
 f_0E:
-        mov     byte [u_ax], 1
+        mov     al, [u_dx]
+        call    cds_set_drive
+        mov     al, [lol_lastdrive]
+        mov     [u_ax], al
         jmp     int21_ok
 
 ; ===========================================================================
-; 19h - カレントドライブ (A: 固定)
+; 19h - カレントドライブ
+;   出力: AL = ドライブ番号 (0 = A:)
 ; ===========================================================================
 f_19:
-        mov     byte [u_ax], 0
+        mov     al, [cur_drive]
+        mov     [u_ax], al
         jmp     int21_ok
 
 ; ===========================================================================
@@ -434,6 +445,16 @@ f_34:
 ;         CX = セクタあたりバイト数, DX = 総クラスタ数
 ; ===========================================================================
 f_36:
+        ; DL = ドライブ (0 = カレント, 1 = A:)
+        mov     al, [u_dx]
+        test    al, al
+        jnz     .named
+        mov     al, [cur_drive]
+        inc     al
+.named:
+        dec     al
+        call    drive_select
+        jc      .bad
         call    fat_count_free
         mov     [u_bx], ax
         mov     ax, [sec_per_clus]
@@ -442,6 +463,9 @@ f_36:
         mov     ax, [max_cluster]
         sub     ax, 2
         mov     [u_dx], ax
+        jmp     int21_ok
+.bad:
+        mov     word [u_ax], 0xFFFF     ; 無効なドライブ
         jmp     int21_ok
 
 ; ===========================================================================
@@ -569,6 +593,14 @@ f_44:
         jz      .get_info
         cmp     al, 1
         je      .set_info
+        cmp     al, 0x08
+        je      .removable
+        cmp     al, 0x09
+        je      .is_remote
+        cmp     al, 0x0E
+        je      .map_get
+        cmp     al, 0x0F
+        je      .map_set
         mov     ax, ERR_FUNC
         jmp     int21_err
 
@@ -585,11 +617,59 @@ f_44:
         jmp     int21_ok
 .is_file:
         ; ファイル: bit7=0、下位 6bit がドライブ番号 (0 = A:)
-        mov     word [u_dx], 0x0000
+        mov     ax, [si + SFT_DEVINFO]
+        and     ax, SFTI_DRIVE
+        mov     [u_dx], ax
         jmp     int21_ok
 
 .set_info:
         jmp     int21_ok
+
+.removable:
+        ; AL=08h: そのドライブのメディアは交換できるか
+        ;   BL = ドライブ (0 = カレント, 1 = A:)
+        ;   出力: AX = 0 なら交換可能 (フロッピー), 1 なら固定 (ハードディスク)
+        ; INSTALL やセットアッププログラムが「次のディスクを入れてください」と
+        ; 言うかどうかをこれで決めていた。
+        mov     al, [u_bx]
+        test    al, al
+        jnz     .rm_named
+        mov     al, [cur_drive]
+        inc     al
+.rm_named:
+        dec     al
+        push    di
+        call    drive_entry
+        jc      .rm_bad
+        mov     al, [di + DRV_FLAGS]
+        pop     di
+        test    al, DRVF_REMOVABLE
+        jz      .fixed
+        mov     word [u_ax], 0
+        jmp     int21_ok
+.fixed:
+        mov     word [u_ax], 1
+        jmp     int21_ok
+.rm_bad:
+        pop     di
+        jmp     .bad_drive
+
+.is_remote:
+        ; AL=09h: ネットワークドライブか。すべて手元のドライブなので 0。
+        mov     word [u_dx], 0
+        jmp     int21_ok
+
+.map_get:
+        ; AL=0Eh: 論理ドライブの別名を聞く。SUBST も JOIN もしていないので 0。
+        mov     word [u_ax], 0
+        jmp     int21_ok
+.map_set:
+        mov     word [u_ax], 0
+        jmp     int21_ok
+
+.bad_drive:
+        mov     ax, ERR_BAD_DRIVE
+        jmp     int21_err
 .bad_handle:
         mov     ax, ERR_BAD_HANDLE
         jmp     int21_err
@@ -829,7 +909,10 @@ f_57:
         push    es
         push    ds
         pop     es
-        mov     ax, [si + SFT_DIRSEC]
+        mov     al, [si + SFT_DEVINFO]
+        and     al, SFTI_DRIVE
+        call    drive_select
+        mov     eax, [si + SFT_DIRSEC]
         call    dir_load_lba
         pop     es
         jc      .bad
@@ -889,7 +972,20 @@ f_59:
 ; 当時のツールはこれでフロッピーの種類を見分けていた。
 ; ===========================================================================
 f_1B:
+        mov     al, [cur_drive]
+        jmp     f_1C.select
 f_1C:
+        ; DL = ドライブ (0 = カレント, 1 = A:)
+        mov     al, [u_dx]
+        test    al, al
+        jnz     .named
+        mov     al, [cur_drive]
+        inc     al
+.named:
+        dec     al
+.select:
+        call    drive_select
+        jc      .bad
         mov     ax, [sec_per_clus]
         mov     [u_ax], al
         mov     word [u_cx], SECTOR_SIZE
@@ -899,6 +995,9 @@ f_1C:
         mov     ax, cs
         mov     [u_ds], ax
         mov     word [u_bx], media_desc
+        jmp     int21_ok
+.bad:
+        mov     byte [u_ax], 0xFF
         jmp     int21_ok
 
 ; ===========================================================================
@@ -949,11 +1048,18 @@ f_26:
 ; ===========================================================================
 f_32:
         mov     al, [u_dx]
-        cmp     al, 1
-        ja      .bad                    ; A: しかない
+        test    al, al
+        jnz     .named
+        mov     al, [cur_drive]         ; 0 = カレントドライブ
+        inc     al
+.named:
+        dec     al                      ; 1 = A: なので 0 起算に直す
+        call    drive_entry
+        jc      .bad
+        call    dpb_for_drive
         mov     ax, cs
         mov     [u_ds], ax
-        mov     word [u_bx], dpb
+        mov     [u_bx], bx
         mov     byte [u_ax], 0
         jmp     int21_ok
 .bad:

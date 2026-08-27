@@ -199,9 +199,6 @@ t_dpb:
         jne     fail
         cmp     byte [es:bx + DPB_MEDIA], 0xF0  ; 1.44MB フロッピー
         jne     fail
-        ; 次の DPB は無い (FFFF:FFFF)
-        cmp     word [es:bx + DPB_NEXT], 0xFFFF
-        jne     fail
 
         ; AH=32h が返すものと同じ場所を指しているはず
         push    es
@@ -220,6 +217,26 @@ t_dpb:
         mov     ax, es
         cmp     dx, ax
         jne     fail
+
+        ; 連鎖を辿る。ドライブが増えても終端 (FFFF:FFFF) に届き、
+        ; 途中のドライブ番号は増える一方でなければならない。
+        ; ハードディスクを繋いだ環境では A: の次に C: が並ぶ。
+        mov     cl, [es:bx + DPB_DRIVE]
+        xor     ch, ch                  ; CH = 数えた DPB の数
+.walk:
+        inc     ch
+        cmp     ch, 30
+        jae     fail                    ; 終わりが来ない
+        cmp     word [es:bx + DPB_NEXT + 2], 0xFFFF
+        je      .end
+        les     bx, [es:bx + DPB_NEXT]
+        cmp     word [es:bx + DPB_SECSIZE], 512
+        jne     fail
+        cmp     byte [es:bx + DPB_DRIVE], cl
+        jbe     fail                    ; 番号は増える一方
+        mov     cl, [es:bx + DPB_DRIVE]
+        jmp     .walk
+.end:
         jmp     pass
 
 ; ============================================================================

@@ -66,29 +66,29 @@ dir_mkdir:
         ; クラスタの先頭セクタに書き、残りのセクタは 0 で埋める
         mov     ax, [.newclus]
         call    clus_to_lba
-        mov     [dir_cur_lba], ax
+        mov     [dir_cur_lba], eax
         call    dir_store
         jc      .io_error
 
         mov     cx, [sec_per_clus]
         dec     cx
         jcxz    .cluster_ready
-        push    ax
+        push    eax
         mov     di, dir_buf
         push    cx
         mov     cx, SECTOR_SIZE
         xor     al, al
         rep     stosb
         pop     cx
-        pop     ax
+        pop     eax
 .zero_loop:
-        inc     ax
-        push    ax
+        inc     eax
+        push    eax
         push    cx
-        mov     [dir_cur_lba], ax
+        mov     [dir_cur_lba], eax
         call    dir_store
         pop     cx
-        pop     ax
+        pop     eax
         jc      .io_error
         loop    .zero_loop
 .cluster_ready:

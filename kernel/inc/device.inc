@@ -606,7 +606,7 @@ blk_interrupt:
         push    bx
         les     di, [es:bx + REQ_BUFFER]
         mov     bx, di
-        mov     ax, dx
+        movzx   eax, dx
         call    disk_read_unit
         pop     bx
         pop     es
@@ -625,7 +625,7 @@ blk_interrupt:
         push    bx
         les     di, [es:bx + REQ_BUFFER]
         mov     bx, di
-        mov     ax, dx
+        movzx   eax, dx
         call    disk_write_unit
         pop     bx
         pop     es
@@ -641,7 +641,11 @@ blk_interrupt:
         jmp     .ok
 
 .buildbpb:
-        ; そのユニットの BPB へのポインタを返す
+        ; そのユニットの BPB を組み立ててから、その位置を返す
+        push    ax
+        mov     al, [es:bx + REQ_UNIT]
+        call    bpb_image_build
+        pop     ax
         mov     word [es:bx + REQ_BUFFER], bpb_image
         mov     ax, cs
         mov     [es:bx + REQ_BUFFER + 2], ax
@@ -775,9 +779,29 @@ lol_numjoin:    db 0                            ; +34 JOIN されたドライブ
 ; ---------------------------------------------------------------------------
 lol_init:
         push    ax
-        mov     ax, cs
 
-        mov     word [lol_first_dpb], dpb
+        ; DPB の連鎖の先頭。実在する最初のドライブのものを指す。
+        push    bx
+        push    cx
+        xor     cl, cl
+.find_dpb:
+        mov     al, cl
+        call    drive_entry
+        jnc     .got_dpb
+        inc     cl
+        cmp     cl, MAX_DRIVES
+        jb      .find_dpb
+        mov     bx, drive_tab + DRV_DPB         ; 1 台も無いときの逃げ道
+        jmp     .set_dpb
+.got_dpb:
+        mov     al, cl
+        call    dpb_for_drive
+.set_dpb:
+        pop     cx
+        mov     word [lol_first_dpb], bx
+        pop     bx
+
+        mov     ax, cs
         mov     [lol_first_dpb + 2], ax
         mov     word [lol_first_sft], sft_header
         mov     [lol_first_sft + 2], ax

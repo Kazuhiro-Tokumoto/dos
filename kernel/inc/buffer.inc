@@ -46,7 +46,9 @@ buf_init:
         mov     byte [si + BUF_FLAGS], 0
         mov     dword [si + BUF_SECTOR], 0xFFFFFFFF
         mov     word [si + BUF_USE], 0
-        mov     word [si + BUF_DPB], dpb
+        mov     byte [si + BUF_COPIES], 1
+        mov     word [si + BUF_OFFSET], 0
+        mov     word [si + BUF_DPB], drive_tab + DRV_DPB
         mov     ax, cs
         mov     [si + BUF_DPB + 2], ax
 
@@ -73,7 +75,7 @@ buf_init:
 
 ; ---------------------------------------------------------------------------
 ; buf_find - すでに載っているセクタを探す
-;   入力: AX = LBA, DL = ドライブ番号
+;   入力: EAX = LBA, DL = ドライブ番号
 ;   出力: CF=0 なら SI = バッファヘッダ
 ; ---------------------------------------------------------------------------
 buf_find:
@@ -84,9 +86,7 @@ buf_find:
 .loop:
         cmp     [si + BUF_DRIVE], dl
         jne     .next
-        cmp     [si + BUF_SECTOR], ax
-        jne     .next
-        cmp     word [si + BUF_SECTOR + 2], 0
+        cmp     [si + BUF_SECTOR], eax
         jne     .next
         ; 見つかった。使った印を新しくする
         inc     word [buf_tick]
@@ -109,7 +109,7 @@ buf_find:
 ;   出力: SI = バッファヘッダ。書き換えられていたら先に書き戻す
 ; ---------------------------------------------------------------------------
 buf_victim:
-        push    ax
+        push    eax                     ; ← 呼び出し元は LBA を EAX で持っている
         push    bx
         push    cx
         push    dx
@@ -136,7 +136,7 @@ buf_victim:
         pop     dx
         pop     cx
         pop     bx
-        pop     ax
+        pop     eax
         ret
 .flush:
         ; 書き換えられていたら追い出す前に戻す
@@ -147,7 +147,7 @@ buf_victim:
         pop     dx
         pop     cx
         pop     bx
-        pop     ax
+        pop     eax
         ret
 
 ; ---------------------------------------------------------------------------
@@ -155,15 +155,15 @@ buf_victim:
 ;   入力: SI = バッファヘッダ
 ; ---------------------------------------------------------------------------
 buf_writeback:
-        push    ax
+        push    eax                     ; ← 中で EAX を LBA として使い潰す
         push    bx
         push    cx
-        push    dx
+        push    edx
         push    es
 
         push    ds
         pop     es
-        mov     ax, [si + BUF_SECTOR]
+        mov     eax, [si + BUF_SECTOR]
         mov     bx, si
         add     bx, BUF_DATA
         mov     cx, 1
@@ -171,21 +171,43 @@ buf_writeback:
         call    disk_write_drive
         jc      .fail
         and     byte [si + BUF_FLAGS], ~BUFF_DIRTY & 0xFF
+
+        ; FAT のセクタは複数のコピーへ同じ内容を書く。片方だけ書いて
+        ; 落ちると CHKDSK が「FAT が食い違っている」と言い出す。
+        movzx   cx, byte [si + BUF_COPIES]
+        cmp     cx, 2
+        jb      .fail
+        dec     cx
+        movzx   edx, word [si + BUF_OFFSET]
+.copy_loop:
+        add     eax, edx
+        push    cx
+        push    eax
+        push    edx
+        mov     bx, si
+        add     bx, BUF_DATA
+        mov     cx, 1
+        mov     dl, [si + BUF_DRIVE]
+        call    disk_write_drive
+        pop     edx
+        pop     eax
+        pop     cx
+        loop    .copy_loop
 .fail:
         pop     es
-        pop     dx
+        pop     edx
         pop     cx
         pop     bx
-        pop     ax
+        pop     eax
         ret
 
 ; ---------------------------------------------------------------------------
 ; buf_get - セクタをバッファに載せて、その場所を返す
-;   入力: AX = LBA, DL = ドライブ番号
+;   入力: EAX = LBA, DL = ドライブ番号
 ;   出力: CF=0 なら SI = バッファヘッダ (中身は SI + BUF_DATA から 512 バイト)
 ; ---------------------------------------------------------------------------
 buf_get:
-        push    ax
+        push    eax
         push    bx
         push    cx
         push    es
@@ -204,9 +226,10 @@ buf_get:
         jc      .fail
 
         mov     [si + BUF_DRIVE], dl
-        mov     [si + BUF_SECTOR], ax
-        mov     word [si + BUF_SECTOR + 2], 0
+        mov     [si + BUF_SECTOR], eax
         mov     byte [si + BUF_FLAGS], 0
+        mov     byte [si + BUF_COPIES], 1
+        mov     word [si + BUF_OFFSET], 0
         inc     word [buf_tick]
         mov     bx, [buf_tick]
         mov     [si + BUF_USE], bx
@@ -215,7 +238,7 @@ buf_get:
         pop     es
         pop     cx
         pop     bx
-        pop     ax
+        pop     eax
         clc
         ret
 .fail:
@@ -224,7 +247,7 @@ buf_get:
         pop     es
         pop     cx
         pop     bx
-        pop     ax
+        pop     eax
         stc
         ret
 
@@ -241,7 +264,7 @@ buf_dirty:
 ;   出力: CF=1 なら 1 つでも失敗した
 ; ---------------------------------------------------------------------------
 buf_flush:
-        push    ax
+        push    eax
         push    cx
         push    si
 
@@ -263,13 +286,13 @@ buf_flush:
         jnz     .fail
         pop     si
         pop     cx
-        pop     ax
+        pop     eax
         clc
         ret
 .fail:
         pop     si
         pop     cx
-        pop     ax
+        pop     eax
         stc
         ret
 

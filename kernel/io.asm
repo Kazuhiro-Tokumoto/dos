@@ -84,7 +84,13 @@ kernel_main:
         jc      .disk_fail
 
         ; --- ドライブごとのカレントディレクトリ (CDS) ---
+        ; 見つかったドライブが LASTDRIVE より多ければそちらに合わせる。
+        ; そうしないと検出したドライブに文字が割り当たらない。
         mov     al, DEFAULT_LASTDRIVE
+        cmp     al, [num_drives]
+        jae     .lastdrive_ok
+        mov     al, [num_drives]
+.lastdrive_ok:
         call    cds_init
 
         ; --- ファイルハンドルの土台 ---
@@ -421,7 +427,9 @@ int25_handler:
 
         push    ds
         pop     es                      ; ES:BX = バッファ
-        mov     ax, dx                  ; AX = 開始 LBA
+        movzx   si, al                  ; SI = ドライブ番号 (0 = A:)
+        movzx   eax, dx                 ; EAX = 開始 LBA
+        mov     dx, si                  ; DL = ドライブ番号
         push    ds
         mov     si, cs
         mov     ds, si
@@ -462,7 +470,9 @@ int26_handler:
 
         push    ds
         pop     es
-        mov     ax, dx
+        movzx   si, al                  ; SI = ドライブ番号
+        movzx   eax, dx                 ; EAX = 開始 LBA
+        mov     dx, si                  ; DL = ドライブ番号
         push    ds
         mov     si, cs
         mov     ds, si
@@ -499,10 +509,11 @@ int26_handler:
 %include "con.inc"
 %include "time.inc"
 %include "disk.inc"
+%include "drive.inc"
 %include "buffer.inc"
 %include "cds.inc"
 %include "device.inc"
-%include "fat12.inc"
+%include "fat.inc"
 %include "mem.inc"
 %include "file.inc"
 %include "fcb.inc"
@@ -539,10 +550,10 @@ ret_zf:         db 0                    ; 0=触らない 1=ZF を立てる 2=倒
 
 ; --- バッファ --------------------------------------------------------------
 name83:         times 11 db 0           ; 8.3 に畳んだ作業用の名前
-dir_cur_lba:    dw 0                    ; dir_buf に載っているセクタの LBA
+dir_cur_lba:    dd 0                    ; dir_buf に載っているセクタの LBA
 dir_buf:        times SECTOR_SIZE db 0
 sector_buf:     times SECTOR_SIZE db 0
-fat_buf:        times 12 * SECTOR_SIZE db 0     ; FAT 1 本ぶん (最大 12 セクタ)
+fat_buf:        times FAT_RESIDENT_SECS * SECTOR_SIZE db 0  ; 常駐 FAT (FAT12 用)
 
 ; --- カーネルスタック ------------------------------------------------------
 ; INT 21h の処理中はここを使う。プログラム側のスタックは触らない。

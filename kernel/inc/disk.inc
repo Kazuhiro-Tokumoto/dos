@@ -1,180 +1,89 @@
 ; ============================================================================
-; disk.inc  -  ブロックデバイス (INT 13h によるセクタ入出力) と BPB
+; disk.inc  -  セクタ入出力 (INT 13h)
 ;
-; ジオメトリは決め打ちせず、必ず BPB から取る。これが本来の DOS の作法で、
-; 1.44MB 以外のフォーマットに広げるときもここを直さずに済む。
+; LBA は 32bit で扱う。フロッピーだけなら 16bit で足りるが、ハードディスクの
+; パーティションは軽く 65536 セクタを超えるので、ここを 16bit にしたままだと
+; 32MB の壁がそのまま残る。
+;
+; 転送方式は 2 通り:
+;   CHS (AH=02h/03h)   どの BIOS にもある。フロッピーはこちら。
+;   LBA (AH=42h/43h)   INT 13h 拡張。あるかどうかを AH=41h で確かめてから使う。
+; CHS はシリンダ番号を 10bit しか渡せず 8GB あたりで頭打ちになるので、
+; 使えるなら LBA を選ぶ。
+;
+; ドライブごとの諸元 (ジオメトリ、パーティションの開始位置、拡張の可否) は
+; drive.inc の表から引く。ここはその表に従って転送するだけ。
 ; ============================================================================
 
 ; ---------------------------------------------------------------------------
-; disk_init - ブートセクタを読み直して BPB を取り込む
-;   入力: [boot_drive] が設定済みであること
-;   出力: CF=1 なら BPB がおかしい
-;
-; Stage2 から BPB を受け取るのではなく自分で読み直す。カーネルは起動直後に
-; 自分自身を 0x0060:0 へ再配置するので、そのとき 0x7C00 のブートセクタを
-; 踏み潰す可能性があるため。「たまたま残っている値」に依存させない。
+; disk_detect_ext - そのドライブが INT 13h 拡張に対応しているか調べる
+;   入力: DL = BIOS のドライブ番号
+;   出力: CF=0 なら対応している
 ; ---------------------------------------------------------------------------
-disk_init:
+disk_detect_ext:
         push    ax
         push    bx
-        push    dx
-        push    es
-
-        push    ds
-        pop     es
-        mov     bx, sector_buf
-        xor     ax, ax                  ; LBA 0 = ブートセクタ
-        ; ジオメトリがまだ分からないので CHS(0,0,1) を直接指定する。
-        ; LBA 0 は必ずシリンダ0/ヘッド0/セクタ1 なので変換は要らない。
-        mov     word [secs_per_track], 18    ; read_one が使う暫定値
-        mov     word [num_heads], 2
-        call    disk_read_one
-        jc      .bad
-
-        mov     bx, sector_buf
-        cmp     word [bx + 0x0B], SECTOR_SIZE
-        jne     .bad
-
-        mov     al, [bx + 0x0D]
-        xor     ah, ah
-        test    al, al
-        jz      .bad
-        mov     [sec_per_clus], ax
-
-        mov     ax, [bx + 0x0E]
-        test    ax, ax
-        jz      .bad
-        mov     [reserved_secs], ax
-
-        mov     al, [bx + 0x10]
-        xor     ah, ah
-        test    al, al
-        jz      .bad
-        mov     [num_fats], ax
-
-        mov     ax, [bx + 0x11]
-        mov     [root_entries], ax
-
-        mov     ax, [bx + 0x13]
-        test    ax, ax
-        jz      .bad
-        mov     [total_secs], ax
-
-        mov     al, [bx + 0x15]
-        mov     [media_desc], al
-
-        mov     ax, [bx + 0x16]
-        test    ax, ax
-        jz      .bad
-        mov     [secs_per_fat], ax
-
-        mov     ax, [bx + 0x18]
-        test    ax, ax
-        jz      .bad
-        mov     [secs_per_track], ax
-
-        mov     ax, [bx + 0x1A]
-        test    ax, ax
-        jz      .bad
-        mov     [num_heads], ax
-
-        ; ボリュームラベルとシリアル番号 (AH=69h や DIR が使う)
-        mov     ax, [bx + 0x27]
-        mov     [volume_serial], ax
-        mov     ax, [bx + 0x29]
-        mov     [volume_serial + 2], ax
-
-        ; --- レイアウトを計算する ---
-        mov     ax, [num_fats]
-        mul     word [secs_per_fat]
-        add     ax, [reserved_secs]
-        mov     [root_lba], ax          ; ルートディレクトリの開始 LBA
-
-        mov     ax, [root_entries]
-        add     ax, 15
-        shr     ax, 4                   ; (エントリ数 * 32 + 511) / 512
-        mov     [root_secs], ax
-
-        add     ax, [root_lba]
-        mov     [data_lba], ax          ; データ領域の開始 LBA
-
-        ; クラスタ 1 個のバイト数。ファイル位置の計算で毎回使う
-        mov     ax, [sec_per_clus]
-        mov     dx, SECTOR_SIZE
-        mul     dx
-        mov     [clus_bytes], ax
-
-        ; 使えるクラスタ数 = (総セクタ - データ開始) / クラスタあたりセクタ数
-        mov     ax, [total_secs]
-        sub     ax, [data_lba]
-        xor     dx, dx
-        div     word [sec_per_clus]
-        add     ax, 2                   ; クラスタ番号は 2 から始まる
-        mov     [max_cluster], ax       ; これ以上は存在しないクラスタ番号
-
-        ; FAT を丸ごとメモリに載せる。1.44MB なら 9 セクタ = 4608 バイトで、
-        ; 常駐させても惜しくない。クラスタを辿るたびにディスクを叩かずに済む。
-        mov     ax, [reserved_secs]
-        mov     cx, [secs_per_fat]
-        mov     bx, fat_buf
-        push    ds
-        pop     es
-        call    disk_read
-        jc      .bad
-        mov     byte [fat_dirty], 0
-
-        call    dpb_build
-
-        clc
-        jmp     .done
-.bad:
-        stc
-.done:
-        pop     es
-        pop     dx
+        push    cx
+        mov     ah, 0x41
+        mov     bx, 0x55AA
+        int     0x13
+        jc      .no
+        cmp     bx, 0xAA55              ; 対応していれば入れ替わって返る
+        jne     .no
+        test    cl, 1                   ; bit0 = セクタ単位の読み書きに対応
+        jz      .no
+        pop     cx
         pop     bx
         pop     ax
+        clc
+        ret
+.no:
+        pop     cx
+        pop     bx
+        pop     ax
+        stc
         ret
 
 ; ---------------------------------------------------------------------------
-; ドライブ番号つきの入口
-;
-; いまは A: しかないので中身は同じだが、上位はすべてここを通しておく。
-; 複数ドライブを足すときに直すのがこの 3 つだけで済む。
+; disk_geometry - BIOS にジオメトリを聞く
+;   入力: DL = BIOS のドライブ番号
+;   出力: CF=0 なら CX = セクタ/トラック, DX = ヘッド数
 ; ---------------------------------------------------------------------------
-disk_read_drive:                        ; DL = ドライブ, AX = LBA, CX = 数, ES:BX = 先
-        call    disk_read
+disk_geometry:
+        push    ax
+        push    bx
+        push    di
+        push    es
+        xor     ax, ax
+        mov     es, ax
+        xor     di, di                  ; 一部の BIOS 対策で ES:DI を 0 に
+        mov     ah, 0x08
+        int     0x13
+        jc      .fail
+        movzx   bx, dh
+        inc     bx                      ; ヘッド数 = 最大ヘッド番号 + 1
+        and     cl, 0x3F                ; セクタ/トラックは下位 6bit
+        movzx   cx, cl
+        jcxz    .fail
+        mov     dx, bx
+        pop     es
+        pop     di
+        pop     bx
+        pop     ax
+        clc
         ret
-
-disk_write_drive:                       ; DL = ドライブ
-        call    disk_write
-        ret
-
-dpb_for_drive:                          ; AL = ドライブ → BX = DPB
-        mov     bx, dpb
-        ret
-
-; ---------------------------------------------------------------------------
-; disk_read_unit / disk_write_unit - ブロックデバイスドライバから呼ばれる入口
-;   入力: AX = LBA, CX = セクタ数, ES:BX = バッファ, [blk_unit] = ユニット
-; ---------------------------------------------------------------------------
-disk_read_unit:
-        push    dx
-        mov     dl, [blk_unit]
-        call    disk_read_drive
-        pop     dx
-        ret
-
-disk_write_unit:
-        push    dx
-        mov     dl, [blk_unit]
-        call    disk_write_drive
-        pop     dx
+.fail:
+        pop     es
+        pop     di
+        pop     bx
+        pop     ax
+        stc
         ret
 
 ; ---------------------------------------------------------------------------
 ; disk_read - LBA から連続したセクタを読む
-;   入力: AX = 開始 LBA, CX = セクタ数, ES:BX = 転送先
+;   入力: EAX = 開始 LBA (そのドライブの先頭から), CX = セクタ数,
+;         ES:BX = 転送先, DL = ドライブ番号 (0 = A:)
 ;   出力: CF=1 なら失敗。全レジスタは保存される
 ; ---------------------------------------------------------------------------
 disk_read:
@@ -186,8 +95,6 @@ disk_read:
 
 ; ---------------------------------------------------------------------------
 ; disk_write - LBA へ連続したセクタを書く
-;   入力: AX = 開始 LBA, CX = セクタ数, ES:BX = 転送元
-;   出力: CF=1 なら失敗
 ; ---------------------------------------------------------------------------
 disk_write:
         push    si
@@ -198,25 +105,42 @@ disk_write:
 
 ; ---------------------------------------------------------------------------
 ; disk_xfer - 読み書き共通の本体
-;   入力: AX = LBA, CX = セクタ数, ES:BX = 転送先/元, SI = 0:読み 1:書き
+;   入力: EAX = LBA, CX = セクタ数, ES:BX = 転送先/元, DL = ドライブ, SI = 向き
 ; ---------------------------------------------------------------------------
 disk_xfer:
-        pusha
+        pushad
         push    es
-        mov     [.lba], ax
+
+        ; ドライブの諸元を引いて、パーティションの先頭を足す
+        push    eax
+        mov     al, dl
+        call    drive_entry             ; DI = そのドライブの情報
+        pop     eax
+        jc      .fail
+
+        add     eax, [di + DRV_PARTLBA]
+        mov     [.lba], eax
         mov     [.count], cx
         mov     [.dir], si
+        mov     al, [di + DRV_PHYS]
+        mov     [.phys], al
+        mov     al, [di + DRV_USEEXT]
+        mov     [.useext], al
+        mov     ax, [di + DRV_SECPERTRK]
+        mov     [.spt], ax
+        mov     ax, [di + DRV_HEADS]
+        mov     [.heads], ax
+
 .loop:
         cmp     word [.count], 0
         je      .done
-        mov     ax, [.lba]
-        mov     si, [.dir]
-        test    si, si
-        jz      .rd
-        call    disk_write_one
+        mov     eax, [.lba]
+        cmp     byte [.useext], 0
+        jne     .ext
+        call    disk_chs_one
         jmp     .check
-.rd:
-        call    disk_read_one
+.ext:
+        call    disk_lba_one
 .check:
         jc      .fail
         add     bx, SECTOR_SIZE
@@ -225,26 +149,30 @@ disk_xfer:
         add     ax, 0x1000
         mov     es, ax
 .no_wrap:
-        inc     word [.lba]
+        inc     dword [.lba]
         dec     word [.count]
         jmp     .loop
 .done:
         pop     es
-        popa
+        popad
         clc
         ret
 .fail:
         pop     es
-        popa
+        popad
         stc
         ret
-.lba:   dw 0
-.count: dw 0
-.dir:   dw 0
+.lba:    dd 0
+.count:  dw 0
+.dir:    dw 0
+.phys:   db 0
+.useext: db 0
+.spt:    dw 0
+.heads:  dw 0
 
 ; ---------------------------------------------------------------------------
-; disk_read_one / disk_write_one - 1 セクタを CHS で転送する
-;   入力: AX = LBA, ES:BX = 転送先/元
+; disk_chs_one - 1 セクタを CHS で転送する (5 回までリトライ)
+;   入力: EAX = ディスク全体での LBA, ES:BX = 転送先/元
 ;   出力: CF=1 なら失敗
 ;
 ; LBA から CHS への変換:
@@ -252,49 +180,55 @@ disk_xfer:
 ;   head     = (LBA / secs_per_track) mod heads
 ;   cylinder = (LBA / secs_per_track) / heads
 ; ---------------------------------------------------------------------------
-; AX = LBA。機能番号はレジスタではなく変数で渡す。
-; AH に入れて渡すと AX を LBA として使えなくなる (LBA 0 が 0x0200 に化ける)。
-disk_read_one:
-        mov     byte [disk_chs_op.func], 0x02
-        jmp     disk_chs_op
-
-disk_write_one:
-        mov     byte [disk_chs_op.func], 0x03
-        jmp     disk_chs_op
-
-; AX = LBA, ES:BX = 転送先/元, [.func] = INT 13h の機能番号
-disk_chs_op:
-        push    ax
-        push    bx
-        push    cx
-        push    dx
+disk_chs_one:
+        push    eax
+        push    ecx
+        push    edx
         push    di
 
-        xor     dx, dx
-        div     word [secs_per_track]   ; AX = LBA/spt, DX = LBA mod spt
-        mov     cl, dl
-        inc     cl                      ; セクタ番号は 1 起算
-        xor     dx, dx
-        div     word [num_heads]        ; AX = シリンダ, DX = ヘッド
+        movzx   ecx, word [disk_xfer.spt]
+        xor     edx, edx
+        div     ecx                     ; EAX = LBA/spt, EDX = セクタ番号-1
+        mov     [.sector], dl
+        movzx   ecx, word [disk_xfer.heads]
+        xor     edx, edx
+        div     ecx                     ; EAX = シリンダ, EDX = ヘッド
+
+        cmp     eax, 1023
+        ja      .too_big                ; CHS では届かない範囲
+
+        mov     [.head], dl
+
+        ; CH = シリンダ下位 8bit, CL = シリンダ上位 2bit + セクタ番号
         mov     ch, al
-        mov     dh, dl
-        mov     dl, [boot_drive]
+        mov     cl, ah
+        and     cl, 0x03
+        shl     cl, 6
+        mov     dl, [.sector]
+        inc     dl                      ; セクタ番号は 1 起算
+        or      cl, dl
+
+        mov     dh, [.head]
+        mov     dl, [disk_xfer.phys]
 
         mov     di, 5                   ; リトライ回数
 .retry:
-        mov     ah, [.func]
-        mov     al, 1                   ; 1 セクタ
+        mov     ah, [disk_xfer.dir]
+        add     ah, 2                   ; 0 → 02h (読み), 1 → 03h (書き)
+        mov     al, 1
         int     0x13
         jnc     .ok
 
-        ; 失敗したらディスクリセットを挟む。実機のフロッピーはモータの
-        ; 回転待ちで初回が失敗することがある。
+        ; 失敗したらリセットを挟む。実機のフロッピーはモータの回転待ちで
+        ; 初回が失敗することがある。
         push    ax
+        push    cx
         xor     ax, ax
-        mov     dl, [boot_drive]
+        mov     dl, [disk_xfer.phys]
         int     0x13
+        pop     cx
         pop     ax
-        mov     dl, [boot_drive]        ; リセットで壊れている可能性がある
+        mov     dl, [disk_xfer.phys]
         dec     di
         jnz     .retry
         stc
@@ -303,143 +237,96 @@ disk_chs_op:
         clc
 .out:
         pop     di
-        pop     dx
-        pop     cx
-        pop     bx
-        pop     ax
+        pop     edx
+        pop     ecx
+        pop     eax
         ret
-.func:  db 0
-
-; ---------------------------------------------------------------------------
-; disk_flush_fat - 変更された FAT をディスクに書き戻す
-;   出力: CF=1 なら失敗
-;
-; FAT はコピーが 2 つあり、両方を同じ内容に保つ必要がある。片方だけ
-; 書いて落ちると CHKDSK が「FAT が食い違っている」と言い出す。
-; ---------------------------------------------------------------------------
-disk_flush_fat:
-        cmp     byte [fat_dirty], 0
-        je      .nothing
-
-        pusha
-        push    es
-        push    ds
-        pop     es
-
-        mov     cx, [num_fats]
-        mov     ax, [reserved_secs]
-.loop:
-        push    cx
-        push    ax
-        mov     bx, fat_buf
-        mov     cx, [secs_per_fat]
-        call    disk_write
-        pop     ax
-        pop     cx
-        jc      .fail
-        add     ax, [secs_per_fat]      ; 次の FAT のコピーへ
-        loop    .loop
-
-        mov     byte [fat_dirty], 0
-        pop     es
-        popa
-        call    buf_flush
-        ret
-.fail:
-        pop     es
-        popa
+.too_big:
+        pop     di
+        pop     edx
+        pop     ecx
+        pop     eax
         stc
         ret
-.nothing:
-        call    buf_flush
-        ret
+.sector: db 0
+.head:   db 0
 
 ; ---------------------------------------------------------------------------
-; dpb_build - DPB (Drive Parameter Block) を組み立てる
+; disk_lba_one - 1 セクタを INT 13h 拡張 (LBA) で転送する
+;   入力: EAX = ディスク全体での LBA, ES:BX = 転送先/元
 ;
-; DOS が各ドライブについて持っている構造体。AH=32h でプログラムに直接
-; 渡され、List of Lists からも辿れる。当時のディスクツール
-; (CHKDSK、デフラグ、セクタエディタの類) はここからジオメトリを読む。
-; BPB を読み直すのではなく DPB を見るのが正しい作法とされていた。
+; ディスクアドレスパケットを組んで DS:SI で渡す。CHS のシリンダ 10bit と
+; いう枷が無いので、大きなディスクはこちらでしか届かない。
 ; ---------------------------------------------------------------------------
-dpb_build:
+disk_lba_one:
         push    ax
         push    cx
         push    dx
+        push    si
+        push    ds
 
-        mov     byte [dpb + DPB_DRIVE], 0       ; A:
-        mov     byte [dpb + DPB_UNIT], 0
-        mov     word [dpb + DPB_SECSIZE], SECTOR_SIZE
+        push    cs
+        pop     ds
 
-        mov     ax, [sec_per_clus]
-        dec     ax
-        mov     [dpb + DPB_CLUSMASK], al        ; クラスタ内の最大セクタ番号
+        mov     byte [dap_size], 16
+        mov     byte [dap_zero], 0
+        mov     word [dap_count], 1
+        mov     [dap_off], bx
+        mov     [dap_seg], es
+        mov     [dap_lba], eax
+        mov     dword [dap_lba + 4], 0
 
-        ; クラスタ→セクタの変換に使うシフト量 (sec_per_clus の log2)
-        mov     ax, [sec_per_clus]
-        xor     cl, cl
-.shift:
-        shr     ax, 1
-        cmp     ax, 1
-        jb      .shift_done
-        inc     cl
-        jmp     .shift
-.shift_done:
-        mov     [dpb + DPB_CLUSSHIFT], cl
-
-        mov     ax, [reserved_secs]
-        mov     [dpb + DPB_RESERVED], ax
-        mov     al, [num_fats]
-        mov     [dpb + DPB_NUMFATS], al
-        mov     ax, [root_entries]
-        mov     [dpb + DPB_ROOTENT], ax
-        mov     ax, [data_lba]
-        mov     [dpb + DPB_DATASEC], ax
-        mov     ax, [max_cluster]
-        dec     ax
-        mov     [dpb + DPB_MAXCLUS], ax         ; 最大クラスタ番号
-        mov     ax, [secs_per_fat]
-        mov     [dpb + DPB_SECPERFAT], ax
-        mov     ax, [root_lba]
-        mov     [dpb + DPB_DIRSEC], ax
-        mov     al, [media_desc]
-        mov     [dpb + DPB_MEDIA], al
-        mov     byte [dpb + DPB_ACCESS], 0      ; 0 = アクセス済み
-        mov     dword [dpb + DPB_NEXT], 0xFFFFFFFF      ; 次の DPB はない
-        mov     word [dpb + DPB_FREESRCH], 2
-        mov     word [dpb + DPB_FREECNT], 0xFFFF        ; 不明 (聞かれたら数える)
-
-        ; デバイスドライバのヘッダ (いまは NUL を指しておく)
-        mov     word [dpb + DPB_DRIVER], 0
-        mov     ax, cs
-        mov     [dpb + DPB_DRIVER + 2], ax
-
+        mov     cx, 3                   ; リトライ回数
+.retry:
+        mov     si, dap
+        mov     ah, [disk_xfer.dir]
+        add     ah, 0x42                ; 0 → 42h (読み), 1 → 43h (書き)
+        xor     al, al
+        mov     dl, [disk_xfer.phys]
+        int     0x13
+        jnc     .ok
+        push    ax
+        xor     ax, ax
+        mov     dl, [disk_xfer.phys]
+        int     0x13                    ; リセット
+        pop     ax
+        loop    .retry
+        stc
+        jmp     .out
+.ok:
+        clc
+.out:
+        pop     ds
+        pop     si
         pop     dx
         pop     cx
         pop     ax
         ret
 
-; --- DPB 本体 --------------------------------------------------------------
-dpb:            times DPB_SIZE db 0
+; --- ディスクアドレスパケット (INT 13h 拡張が読む形) ---
+                align 4
+dap:
+dap_size:       db 16
+dap_zero:       db 0
+dap_count:      dw 1
+dap_off:        dw 0
+dap_seg:        dw 0
+dap_lba:        dd 0, 0
 
-; --- BPB から取り込む値 ----------------------------------------------------
-; すべて word で持つ。掛け算・割り算にそのまま使えるようにするため。
-boot_drive:     db 0
-media_desc:     db 0
-sec_per_clus:   dw 0
-reserved_secs:  dw 0
-num_fats:       dw 0
-root_entries:   dw 0
-total_secs:     dw 0
-secs_per_fat:   dw 0
-secs_per_track: dw 0
-num_heads:      dw 0
-volume_serial:  dd 0
+; ---------------------------------------------------------------------------
+; disk_read_unit / disk_write_unit - ブロックデバイスドライバから呼ばれる入口
+;   入力: EAX = LBA, CX = セクタ数, ES:BX = バッファ, [blk_unit] = ユニット
+; ---------------------------------------------------------------------------
+disk_read_unit:
+        push    dx
+        mov     dl, [blk_unit]
+        call    disk_read
+        pop     dx
+        ret
 
-; --- 計算で求めるレイアウト ------------------------------------------------
-root_lba:       dw 0            ; ルートディレクトリの開始 LBA
-root_secs:      dw 0            ; ルートディレクトリのセクタ数
-data_lba:       dw 0            ; データ領域の開始 LBA
-max_cluster:    dw 0            ; 存在する最大クラスタ番号 + 1
-clus_bytes:     dw 0            ; 1 クラスタのバイト数 (sec_per_clus * 512)
-fat_dirty:      db 0            ; FAT を書き換えたか
+disk_write_unit:
+        push    dx
+        mov     dl, [blk_unit]
+        call    disk_write
+        pop     dx
+        ret

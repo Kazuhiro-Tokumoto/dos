@@ -382,8 +382,50 @@ DPB_FREESRCH    equ 0x1D        ; word: 空き探索の開始クラスタ
 DPB_FREECNT     equ 0x1F        ; word: 空きクラスタ数 (FFFFh = 不明)
 DPB_SIZE        equ 0x21
 
+; --- ドライブ表 (drive.inc) -------------------------------------------------
+;
+; DOS の DPB は「そのドライブのファイルシステムの形」しか持っていない。
+; どの物理ドライブの、どのパーティションの、どの位置から始まるのかは
+; 別に覚えておく必要がある。DPB を含む一回り大きい表をドライブごとに置き、
+; DPB はその中に埋め込む (List of Lists から辿れるのは DPB の側)。
+DRV_FLAGS       equ 0x00        ; byte: 下の DRVF_*
+DRV_PHYS        equ 0x01        ; byte: BIOS のドライブ番号 (00h/01h/80h/81h)
+DRV_USEEXT      equ 0x02        ; byte: 0 = CHS, 1 = INT 13h 拡張
+DRV_FATTYPE     equ 0x03        ; byte: 12 か 16
+DRV_PARTLBA     equ 0x04        ; dword: パーティションの先頭 LBA (絶対)
+DRV_SECPERTRK   equ 0x08        ; word
+DRV_HEADS       equ 0x0A        ; word
+DRV_SECPERCLUS  equ 0x0C        ; word
+DRV_RESERVED    equ 0x0E        ; word: 予約セクタ数
+DRV_NUMFATS     equ 0x10        ; word
+DRV_ROOTENT     equ 0x12        ; word
+DRV_SECPERFAT   equ 0x14        ; word
+DRV_TOTALSEC    equ 0x16        ; dword: 総セクタ数 (小さい版と大きい版の統合)
+DRV_MEDIA       equ 0x1A        ; byte
+DRV_ROOTLBA     equ 0x1C        ; word: ルートディレクトリ (パーティション相対)
+DRV_ROOTSECS    equ 0x1E        ; word
+DRV_DATALBA     equ 0x20        ; word: データ領域の先頭 (パーティション相対)
+DRV_MAXCLUS     equ 0x22        ; word: 存在する最大クラスタ番号 + 1
+DRV_CLUSBYTES   equ 0x24        ; word: 1 クラスタのバイト数
+DRV_SERIAL      equ 0x26        ; dword: ボリュームシリアル
+DRV_LABEL       equ 0x2A        ; 11 バイト: ボリュームラベル
+DRV_DPB         equ 0x35        ; DPB_SIZE バイト: この中に DPB を埋め込む
+DRV_ENTSIZE     equ 0x56
+
+DRVF_PRESENT    equ 0x01        ; 実在する
+DRVF_REMOVABLE  equ 0x02        ; メディアを入れ替えられる (フロッピー)
+
+; --- パーティションテーブル (MBR の +1BEh から 16 バイト x 4) ---------------
+PART_BOOT       equ 0x00        ; byte: 80h なら起動可能
+PART_TYPE       equ 0x04        ; byte: システム ID (01h/04h/06h/0Eh など)
+PART_LBA        equ 0x08        ; dword: 先頭 LBA
+PART_SECS       equ 0x0C        ; dword: セクタ数
+PART_ENTSIZE    equ 16
+PART_TABLE      equ 0x1BE       ; MBR 内での位置
+
 ; --- その他 -----------------------------------------------------------------
 SECTOR_SIZE     equ 512
+FAT_RESIDENT_SECS equ 12       ; 常駐させる FAT の最大セクタ数 (FAT12 用)
 DOS_VER_MAJOR   equ 6
 DOS_VER_MINOR   equ 22
 

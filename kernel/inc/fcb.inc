@@ -294,7 +294,10 @@ fcb_fill_open:
         push    es
         push    ds
         pop     es
-        mov     ax, [si + SFT_DIRSEC]
+        mov     al, [si + SFT_DEVINFO]
+        and     al, SFTI_DRIVE
+        call    drive_select
+        mov     eax, [si + SFT_DIRSEC]
         call    dir_load_lba
         pop     es
         jc      .no_stamp

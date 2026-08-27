@@ -1,25 +1,58 @@
 ; ============================================================================
-; fat12.inc  -  FAT12 ファイルシステム
+; fat.inc  -  FAT12 / FAT16 ファイルシステム
 ;
-; FAT は起動時に丸ごとメモリへ載せてある (disk_init)。クラスタを 1 つ辿る
-; たびにディスクを読みに行かずに済み、書き換えは fat_dirty を立てておいて
-; まとめて 2 つのコピーへ書き戻す。
+; FAT の引き方は 2 通りある。
+;
+; FAT12 は 1 エントリ 12bit で、FAT 全体でも最大 12 セクタ (6KB) にしかならない。
+; 起動時に丸ごとメモリへ載せてしまい (drive.inc の fat_resident_load)、
+; クラスタを 1 つ辿るたびにディスクを読みに行かずに済ませる。書き換えは
+; fat_dirty を立てておいて、まとめて全部のコピーへ書き戻す。
+;
+; FAT16 は 1 エントリ 16bit で、大きなパーティションでは 128KB を超える。
+; 常駐させるわけにいかないので、ディスクバッファ越しに 1 セクタずつ引く。
+; 1 エントリが 2 バイトちょうどなのでセクタ境界を跨がず、FAT12 のような
+; 面倒はない。書き換えたバッファには「FAT のコピー数」を控えておき、
+; 書き戻すときに全部のコピーへ同じ内容が行くようにしてある。
+;
+; 呼び出し側からはどちらでも同じに見えるよう、fat_get / fat_set が
+; ドライブの種別 (fat_type) を見て振り分ける。終端の印は 16bit 幅に
+; 揃えて返すので、FAT12 でも FAT16 でも FAT_EOC で比べられる。
 ; ============================================================================
 
-FAT_EOC         equ 0x0FF8      ; これ以上なら連鎖の終わり
-FAT_EOC_MARK    equ 0x0FFF      ; 終端として書き込む値
-FAT_BAD         equ 0x0FF7
+FAT_EOC         equ 0xFFF8      ; これ以上なら連鎖の終わり
+FAT_EOC_MARK    equ 0xFFFF      ; 終端として書き込む値
+FAT_BAD         equ 0xFFF7      ; 不良クラスタ
 
 ; ---------------------------------------------------------------------------
 ; fat_get - クラスタ番号から FAT のエントリを引く
 ;   入力: AX = クラスタ番号
 ;   出力: AX = 次のクラスタ番号 (FAT_EOC 以上なら終端)
+; ---------------------------------------------------------------------------
+fat_get:
+        cmp     byte [fat_type], 12
+        je      fat12_get
+        jmp     fat16_get
+
+; ---------------------------------------------------------------------------
+; fat_set - FAT のエントリを書き換える
+;   入力: AX = クラスタ番号, DX = 書き込む値
+; ---------------------------------------------------------------------------
+fat_set:
+        cmp     byte [fat_type], 12
+        je      fat12_set
+        jmp     fat16_set
+
+; ---------------------------------------------------------------------------
+; fat12_get - 常駐 FAT から 12bit のエントリを取り出す
 ;
 ; FAT12 は 1 エントリ 12bit なので 2 エントリで 3 バイトを共有している。
 ; クラスタ n のエントリは FAT の n + n/2 バイト目から 16bit 読み、
 ; n が偶数なら下位 12bit、奇数なら上位 12bit を取る。
+;
+; 取り出した値が終端や不良の範囲 (FF7h 以上) なら上位 4bit を立てて
+; 16bit 幅に伸ばす。呼び出し側が FAT16 と同じ定数で比べられるようにするため。
 ; ---------------------------------------------------------------------------
-fat_get:
+fat12_get:
         push    bx
         push    cx
 
@@ -37,15 +70,18 @@ fat_get:
 .even:
         and     ax, 0x0FFF              ; 偶数クラスタは下位 12bit
 .done:
+        cmp     ax, 0x0FF7
+        jb      .plain
+        or      ax, 0xF000              ; 終端・不良の印を 16bit 幅に伸ばす
+.plain:
         pop     cx
         pop     bx
         ret
 
 ; ---------------------------------------------------------------------------
-; fat_set - FAT のエントリを書き換える
-;   入力: AX = クラスタ番号, DX = 書き込む値 (12bit)
+; fat12_set - 常駐 FAT の 12bit エントリを書き換える
 ; ---------------------------------------------------------------------------
-fat_set:
+fat12_set:
         push    ax
         push    bx
         push    cx
@@ -81,6 +117,90 @@ fat_set:
         ret
 
 ; ---------------------------------------------------------------------------
+; fat_sector - FAT16 のエントリが載っているセクタをバッファに載せる
+;   入力: AX = クラスタ番号
+;   出力: CF=0 なら SI = バッファヘッダ、BX = セクタ内のオフセット
+;
+; エントリは 2 バイトなので、1 セクタに 256 個ぶん入る。
+; ---------------------------------------------------------------------------
+fat_sector:
+        push    eax
+        push    cx
+        push    dx
+
+        movzx   eax, ax
+        shl     eax, 1                  ; バイト位置
+        mov     ebx, eax
+        and     ebx, SECTOR_SIZE - 1    ; セクタ内のオフセット
+        shr     eax, 9                  ; セクタ番号
+        movzx   ecx, word [reserved_secs]
+        add     eax, ecx                ; パーティション先頭からの LBA
+
+        mov     dl, [fs_drive]
+        call    buf_get
+        jc      .fail
+
+        ; このバッファは FAT のセクタなので、書き戻すときは全部のコピーへ
+        mov     al, [num_fats]
+        mov     [si + BUF_COPIES], al
+        mov     ax, [secs_per_fat]
+        mov     [si + BUF_OFFSET], ax
+
+        pop     dx
+        pop     cx
+        pop     eax
+        clc
+        ret
+.fail:
+        pop     dx
+        pop     cx
+        pop     eax
+        stc
+        ret
+
+; ---------------------------------------------------------------------------
+; fat16_get - FAT16 のエントリをバッファ越しに引く
+; ---------------------------------------------------------------------------
+fat16_get:
+        push    bx
+        push    si
+
+        call    fat_sector
+        jc      .fail
+        add     bx, si
+        add     bx, BUF_DATA
+        mov     ax, [bx]
+
+        pop     si
+        pop     bx
+        ret
+.fail:
+        mov     ax, FAT_EOC_MARK        ; 読めないときは終端として扱う
+        pop     si
+        pop     bx
+        ret
+
+; ---------------------------------------------------------------------------
+; fat16_set - FAT16 のエントリをバッファ越しに書き換える
+; ---------------------------------------------------------------------------
+fat16_set:
+        push    ax
+        push    bx
+        push    si
+
+        call    fat_sector
+        jc      .out
+        add     bx, si
+        add     bx, BUF_DATA
+        mov     [bx], dx
+        call    buf_dirty
+.out:
+        pop     si
+        pop     bx
+        pop     ax
+        ret
+
+; ---------------------------------------------------------------------------
 ; fat_alloc - 空きクラスタを 1 つ確保する
 ;   出力: CF=0 なら AX = クラスタ番号、CF=1 なら空きなし
 ;
@@ -91,30 +211,58 @@ fat_set:
 ; ---------------------------------------------------------------------------
 fat_alloc:
         push    bx
+        push    cx
         push    dx
+        push    di
 
-        mov     bx, 2                   ; クラスタ番号は 2 から
+        ; 探し始める場所は DPB が覚えている (DPB_FREESRCH)。毎回クラスタ 2 から
+        ; 数え直すと、大きなファイルを作るときに手間がクラスタ数の 2 乗で
+        ; 効いてきて、数万クラスタのパーティションでは実用にならない。
+        ; 本物の DOS も同じ場所に同じ目的の値を持っている。
+        mov     di, [cur_dpb]
+        mov     bx, [di + DPB_FREESRCH]
+        cmp     bx, 2
+        jae     .start_ok
+        mov     bx, 2
+.start_ok:
+        mov     cx, [max_cluster]
+        sub     cx, 2                   ; CX = 見て回る回数の上限
+        jbe     .full
+
 .loop:
         cmp     bx, [max_cluster]
-        jae     .full
+        jb      .in_range
+        mov     bx, 2                   ; 端まで来たら先頭へ回り込む
+.in_range:
         mov     ax, bx
         call    fat_get
         test    ax, ax
         jz      .found
         inc     bx
-        jmp     .loop
+        dec     cx
+        jnz     .loop
+        jmp     .full
 
 .found:
         mov     ax, bx
         mov     dx, FAT_EOC_MARK
-        call    fat_set                 ; ← 確保した瞬間に印を付ける
-        mov     ax, bx
+        call    fat_set                 ; ← 確保した瞬間に印を付ける (AX は保たれる)
+
+        ; 次はこの続きから探す
+        inc     bx
+        cmp     bx, [max_cluster]
+        jb      .save_hint
+        mov     bx, 2
+.save_hint:
+        mov     [di + DPB_FREESRCH], bx
         clc
         jmp     .out
 .full:
         stc
 .out:
+        pop     di
         pop     dx
+        pop     cx
         pop     bx
         ret
 
@@ -174,14 +322,23 @@ fat_count_free:
 ; ---------------------------------------------------------------------------
 ; clus_to_lba - クラスタ番号を LBA に直す
 ;   入力: AX = クラスタ番号
-;   出力: AX = そのクラスタの先頭 LBA
+;   出力: EAX = そのクラスタの先頭 LBA (パーティション先頭からの相対)
+;
+; FAT16 のパーティションは軽く 65536 セクタを超えるので、ここは 32bit で
+; 計算しなければならない。16bit のままだと 32MB を超えた途端に
+; 先頭付近のセクタを壊しにいく。
 ; ---------------------------------------------------------------------------
 clus_to_lba:
-        push    dx
-        sub     ax, 2
-        mul     word [sec_per_clus]
-        add     ax, [data_lba]
-        pop     dx
+        push    edx
+        push    ecx
+        movzx   eax, ax
+        sub     eax, 2
+        movzx   ecx, word [sec_per_clus]
+        mul     ecx                     ; EDX:EAX = (clus - 2) * sec_per_clus
+        movzx   ecx, word [data_lba]
+        add     eax, ecx
+        pop     ecx
+        pop     edx
         ret
 
 ; ============================================================================
@@ -197,7 +354,7 @@ clus_to_lba:
 ; ---------------------------------------------------------------------------
 ; dir_map_sector - ディレクトリの n セクタ目の LBA を求める
 ;   入力: AX = ディレクトリの先頭クラスタ (0 = ルート), BX = セクタ番号 (0 起算)
-;   出力: CF=0 なら AX = LBA、CF=1 なら範囲外 (ディレクトリの終わり)
+;   出力: CF=0 なら EAX = LBA、CF=1 なら範囲外 (ディレクトリの終わり)
 ; ---------------------------------------------------------------------------
 dir_map_sector:
         push    bx
@@ -210,8 +367,9 @@ dir_map_sector:
         ; --- ルートディレクトリ ---
         cmp     bx, [root_secs]
         jae     .oob
-        mov     ax, [root_lba]
-        add     ax, bx
+        movzx   eax, word [root_lba]
+        movzx   ebx, bx
+        add     eax, ebx
         jmp     .ok
 
 .subdir:
@@ -236,7 +394,8 @@ dir_map_sector:
 
 .got:
         call    clus_to_lba
-        add     ax, bx
+        movzx   ebx, bx
+        add     eax, ebx
 
 .ok:
         pop     dx
@@ -257,7 +416,7 @@ dir_map_sector:
 ;   出力: CF=0 なら成功。[dir_cur_lba] に LBA が入る
 ; ---------------------------------------------------------------------------
 dir_load:
-        push    ax
+        push    eax
         push    bx
         push    cx
         push    dx
@@ -267,11 +426,11 @@ dir_load:
 
         call    dir_map_sector
         jc      .fail
-        mov     [dir_cur_lba], ax
+        mov     [dir_cur_lba], eax
 
         ; ディスクバッファ越しに読む。同じディレクトリを何度も辿るので、
         ; ここが素通しだとセクタを読み直す回数が跳ね上がる。
-        mov     dl, [cur_drive]
+        mov     dl, [fs_drive]
         call    buf_get
         jc      .fail
 
@@ -288,7 +447,7 @@ dir_load:
         pop     dx
         pop     cx
         pop     bx
-        pop     ax
+        pop     eax
         clc
         ret
 .fail:
@@ -298,7 +457,7 @@ dir_load:
         pop     dx
         pop     cx
         pop     bx
-        pop     ax
+        pop     eax
         stc
         ret
 
@@ -312,15 +471,15 @@ dir_load:
 ; 新しいエントリを古い内容で上書きしてしまう。
 ; ---------------------------------------------------------------------------
 dir_load_lba:
-        push    ax
+        push    eax
         push    cx
         push    dx
         push    si
         push    di
         push    es
 
-        mov     [dir_cur_lba], ax
-        mov     dl, [cur_drive]
+        mov     [dir_cur_lba], eax
+        mov     dl, [fs_drive]
         call    buf_get
         jc      .fail
 
@@ -336,7 +495,7 @@ dir_load_lba:
         pop     si
         pop     dx
         pop     cx
-        pop     ax
+        pop     eax
         clc
         ret
 .fail:
@@ -345,7 +504,7 @@ dir_load_lba:
         pop     si
         pop     dx
         pop     cx
-        pop     ax
+        pop     eax
         stc
         ret
 
@@ -354,7 +513,7 @@ dir_load_lba:
 ;   出力: CF=1 なら失敗
 ; ---------------------------------------------------------------------------
 dir_store:
-        push    ax
+        push    eax
         push    bx
         push    cx
         push    dx
@@ -364,8 +523,8 @@ dir_store:
 
         push    ds
         pop     es
-        mov     ax, [dir_cur_lba]
-        mov     dl, [cur_drive]
+        mov     eax, [dir_cur_lba]
+        mov     dl, [fs_drive]
         call    buf_get
         jc      .fail
 
@@ -387,7 +546,7 @@ dir_store:
         pop     dx
         pop     cx
         pop     bx
-        pop     ax
+        pop     eax
         clc
         ret
 .fail:
@@ -397,7 +556,7 @@ dir_store:
         pop     dx
         pop     cx
         pop     bx
-        pop     ax
+        pop     eax
         stc
         ret
 
@@ -557,17 +716,18 @@ dir_alloc_entry:
         mov     ax, [.newclus]
         call    clus_to_lba
         mov     cx, [sec_per_clus]
-        mov     [dir_cur_lba], ax
+        mov     [dir_cur_lba], eax
         push    bx
         mov     bx, dir_buf
 .zero_loop:
         push    cx
-        push    ax
+        push    eax
         mov     cx, 1
+        mov     dl, [fs_drive]
         call    disk_write
-        pop     ax
+        pop     eax
         pop     cx
-        inc     ax
+        inc     eax
         loop    .zero_loop
         pop     bx
 
@@ -621,14 +781,25 @@ path_resolve:
         push    ds
         pop     es
 
-        ; --- ドライブ指定 "X:" を読み飛ばす ---
+        ; --- ドライブ指定 "X:" を読む ---
+        ; ここでドライブを選び直すので、"B:\FOO" のように他のドライブを
+        ; 名指ししたパスもそのまま通る。
         mov     al, [si]
         test    al, al
         jz      .bad
+        mov     al, [cur_drive]
         cmp     byte [si + 1], ':'
         jne     .no_drive
+        mov     al, [si]
+        call    to_upper
+        sub     al, 'A'
+        cmp     al, MAX_DRIVES
+        jae     .bad
         add     si, 2
 .no_drive:
+        mov     [.drive], al
+        call    drive_select
+        jc      .bad
 
         ; --- 絶対パスか相対パスか ---
         mov     al, [si]
@@ -636,7 +807,16 @@ path_resolve:
         je      .absolute
         cmp     al, '/'
         je      .absolute
+        ; 相対パスの起点は、そのドライブのカレントディレクトリ
+        mov     al, [.drive]
+        cmp     al, [cur_drive]
+        jne     .other_cwd
         mov     ax, [cur_dir_clus]
+        jmp     .walk
+.other_cwd:
+        call    cds_addr
+        jc      .bad
+        mov     ax, [di + CDS_CLUSTER]
         jmp     .walk
 .absolute:
         inc     si
@@ -706,3 +886,4 @@ path_resolve:
         stc
         ret
 .dirclus: dw 0
+.drive:   db 0

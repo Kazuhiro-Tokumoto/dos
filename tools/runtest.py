@@ -30,13 +30,16 @@ REQUIRED = [
     ("bytes in largest free block", "MEM (MCB 連鎖の走査)"),
     ("TSR-RESIDENT: PASS", "AH=31h 常駐終了が本当に残っている"),
     ("OVERLAY-RELOC: PASS", "AH=4Bh AL=3 オーバーレイのリロケーション"),
+    ("C:\\>", "COMMAND.COM のドライブ切り替え (C:)"),
+    ("Directory of C:\\", "DIR がハードディスク側を読む"),
 ]
 
-# DOSINT / FCBTEST / DOSTEST の 3 本が、それぞれ集計行と終了の目印を出す。
-EXPECTED_SUITES = 3
+# HDTEST / DOSINT / FCBTEST / DOSTEST の 4 本が、
+# それぞれ集計行と終了の目印を出す。
+EXPECTED_SUITES = 4
 
 
-def run(image, timeout, qemu, keep_log):
+def run(image, timeout, qemu, keep_log, hd):
     log_path = os.path.join(os.path.dirname(image) or ".", "serial.log")
     if os.path.exists(log_path):
         os.remove(log_path)
@@ -49,6 +52,10 @@ def run(image, timeout, qemu, keep_log):
         "-no-reboot",
         "-serial", f"file:{log_path}",
     ]
+    if hd:
+        # パーティションを切った FAT16 のハードディスク。
+        # MYDOS はフロッピーから起動し、こちらは C: / D: として見えるはず。
+        cmd += ["-hda", hd]
     print("$ " + " ".join(cmd))
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
@@ -118,11 +125,12 @@ def run(image, timeout, qemu, keep_log):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("image")
-    ap.add_argument("-t", "--timeout", type=int, default=60)
+    ap.add_argument("-t", "--timeout", type=int, default=150)
     ap.add_argument("--qemu", default="qemu-system-i386")
     ap.add_argument("--keep-log", action="store_true")
+    ap.add_argument("--hd", help="ハードディスクのイメージ (C: / D: になる)")
     args = ap.parse_args()
-    sys.exit(run(args.image, args.timeout, args.qemu, args.keep_log))
+    sys.exit(run(args.image, args.timeout, args.qemu, args.keep_log, args.hd))
 
 
 if __name__ == "__main__":

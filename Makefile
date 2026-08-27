@@ -26,6 +26,7 @@ DBGFLAGS  := $(KFLAGS) -DSERIAL_CONSOLE
 
 IMG     := $(BUILD)/dos.img
 IMG_DBG := $(BUILD)/dos-debug.img
+HDIMG   := $(BUILD)/hd.img
 
 STAGE1  := $(BUILD)/stage1.bin
 STAGE2  := $(BUILD)/stage2.bin
@@ -36,12 +37,12 @@ SHELL_COM := $(BUILD)/command.com
 # ディスクに入れるテストプログラム
 PROGS := $(BUILD)/hello.com $(BUILD)/hello.exe $(BUILD)/dostest.com \
          $(BUILD)/fcbtest.com $(BUILD)/tsrtest.com $(BUILD)/ovltest.com \
-         $(BUILD)/dosint.com \
+         $(BUILD)/dosint.com $(BUILD)/hdtest.com \
          $(BUILD)/ovl.ovl
 
 KDEPS := kernel/io.asm $(wildcard $(INCDIR)/*.inc)
 
-.PHONY: all run debug test js-test check clean
+.PHONY: all run debug test js-test check clean hd
 
 all: $(IMG)
 
@@ -96,6 +97,7 @@ define make_image
 	$(MCOPY) -i $(1) -o $(BUILD)/tsrtest.com ::TSRTEST.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/ovltest.com ::OVLTEST.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/dosint.com ::DOSINT.COM
+	$(MCOPY) -i $(1) -o $(BUILD)/hdtest.com ::HDTEST.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/ovl.ovl ::OVL.OVL
 	$(MCOPY) -i $(1) -o tests/readme.txt ::README.TXT
 	$(MCOPY) -i $(1) -o $(3) ::AUTOEXEC.BAT
@@ -109,28 +111,51 @@ $(IMG): $(KERNEL) $(IMGDEPS) tests/autoexec.bat
 $(IMG_DBG): $(KERNEL_DBG) $(IMGDEPS) tests/autoexec-test.bat
 	$(call make_image,$@,$(KERNEL_DBG),tests/autoexec-test.bat)
 
-# --- 実行 -------------------------------------------------------------------
-run: $(IMG)
-	$(QEMU) -fda $(IMG) -boot a
+# --- ハードディスクのイメージ -----------------------------------------------
+#
+# MBR にパーティションを 2 つ置いた FAT16 のディスク。C: と D: になる。
+# フロッピーから起動した MYDOS がこれを見つけられるかを試すためのもので、
+# 中身は毎回作り直す (テストがファイルを書くため)。
+hd: $(HDIMG)
 
-debug: $(IMG_DBG)
-	$(QEMU) -fda $(IMG_DBG) -boot a -serial stdio
+$(HDIMG): tools/mkhd.py | $(BUILD)
+	rm -f $@
+	$(PYTHON) tools/mkhd.py $@
+
+# --- 実行 -------------------------------------------------------------------
+run: $(IMG) $(HDIMG)
+	$(QEMU) -fda $(IMG) -hda $(HDIMG) -boot a
+
+debug: $(IMG_DBG) $(HDIMG)
+	$(QEMU) -fda $(IMG_DBG) -hda $(HDIMG) -boot a -serial stdio
 
 # --- 自動テスト -------------------------------------------------------------
+# ハードディスクのイメージは毎回作り直す。前の実行が書いたファイルが
+# 残っていると「作れるか」の確認にならないため。
 test: $(IMG_DBG)
-	$(PYTHON) tools/runtest.py $(IMG_DBG)
+	rm -f $(HDIMG)
+	$(PYTHON) tools/mkhd.py $(HDIMG)
+	$(PYTHON) tools/runtest.py $(IMG_DBG) --hd $(HDIMG)
 
 # 参照実装 (js/) の回帰テスト。node があるときだけ動く。
 js-test:
 	node js/test-fat12.js
 
 # --- イメージの検証 (ホスト側のツールで読めるか) ----------------------------
-check: $(IMG)
+check: $(IMG) $(HDIMG)
 	@echo "--- mdir でルートディレクトリを読む ---"
 	$(MDIR) -i $(IMG) ::
 	@echo
 	@echo "--- fsck.fat で整合性を見る ---"
 	-fsck.fat -n $(IMG)
+	@echo
+	@echo "--- ハードディスク側 (C: / D:) ---"
+	-$(MDIR) -i $(HDIMG)@@32256 ::
+	-$(MDIR) -i $(HDIMG)@@42319872 ::
+	@echo
+	@echo "--- パーティションを切り出して fsck.fat にかける ---"
+	dd if=$(HDIMG) of=$(BUILD)/part-c.img bs=512 skip=63 count=81920 status=none
+	-fsck.fat -n $(BUILD)/part-c.img
 
 clean:
 	rm -rf $(BUILD)

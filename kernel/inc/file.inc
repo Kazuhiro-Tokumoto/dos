@@ -486,9 +486,8 @@ file_open:
         mov     word [si + SFT_POS], 0
         mov     word [si + SFT_POS + 2], 0
         mov     word [si + SFT_CIDX], 0xFFFF    ; キャッシュ無効
-        mov     ax, [dir_cur_lba]
-        mov     [si + SFT_DIRSEC], ax
-        mov     word [si + SFT_DIRSEC + 2], 0
+        mov     eax, [dir_cur_lba]
+        mov     [si + SFT_DIRSEC], eax
 
         ; dir_buf の何番目のエントリかを覚えておく (閉じるとき書き戻す)
         mov     ax, di
@@ -714,7 +713,11 @@ file_update_dirent:
         pop     es
 
         ; そのエントリのあるセクタを読み直す (必ずバッファ越しに)
-        mov     ax, [si + SFT_DIRSEC]
+        mov     al, [si + SFT_DEVINFO]
+        and     al, SFTI_DRIVE
+        call    drive_select
+        jc      .fail
+        mov     eax, [si + SFT_DIRSEC]
         call    dir_load_lba
         jc      .fail
 
@@ -879,6 +882,13 @@ file_read:
         cmp     al, SFT_DEV_FILE
         jne     .device
 
+        ; この SFT が載っているドライブを作業対象にする。クラスタの計算も
+        ; FAT の引き方もドライブごとに違うので、これを忘れると別の
+        ; ドライブのレイアウトで読み書きしてしまう。
+        mov     al, [si + SFT_DEVINFO]
+        and     al, SFTI_DRIVE
+        call    drive_select
+
         ; 残りバイト数 = サイズ - 位置
         mov     eax, [si + SFT_SIZE]
         sub     eax, [si + SFT_POS]
@@ -909,23 +919,20 @@ file_read:
         jc      .done                   ; 連鎖が途切れていた。読めた分で返す
 
         ; クラスタ内オフセットをセクタ番号とセクタ内オフセットに分ける
-        call    clus_to_lba
-        push    ax
-        mov     ax, [.coff]
-        mov     cl, 9
-        shr     ax, cl                  ; / 512
-        pop     cx
-        add     ax, cx                  ; AX = 読むべき LBA
+        call    clus_to_lba             ; EAX = クラスタ先頭の LBA
+        mov     cx, [.coff]
+        shr     cx, 9                   ; / 512
+        movzx   ecx, cx
+        add     eax, ecx                ; EAX = 読むべき LBA
 
-        push    ax
-        mov     ax, [.coff]
-        and     ax, SECTOR_SIZE - 1
-        mov     [.soff], ax
-        pop     ax
+        mov     cx, [.coff]
+        and     cx, SECTOR_SIZE - 1
+        mov     [.soff], cx
 
         ; セクタをバッファに載せる
         push    si
-        mov     dl, [cur_drive]
+        mov     dl, [si + SFT_DEVINFO]
+        and     dl, SFTI_DRIVE
         call    buf_get
         mov     [.bufptr], si
         pop     si
@@ -1092,6 +1099,13 @@ file_write:
         cmp     al, SFT_DEV_FILE
         jne     .device
 
+        ; この SFT が載っているドライブを作業対象にする。クラスタの計算も
+        ; FAT の引き方もドライブごとに違うので、これを忘れると別の
+        ; ドライブのレイアウトで読み書きしてしまう。
+        mov     al, [si + SFT_DEVINFO]
+        and     al, SFTI_DRIVE
+        call    drive_select
+
         test    cx, cx
         jz      .truncate
 
@@ -1115,14 +1129,12 @@ file_write:
         pop     dx
         jc      .disk_full
 
-        call    clus_to_lba
-        push    ax
-        mov     ax, [.coff]
-        mov     cl, 9
-        shr     ax, cl
-        pop     cx
-        add     ax, cx
-        mov     [.lba], ax
+        call    clus_to_lba             ; EAX = クラスタ先頭の LBA
+        mov     cx, [.coff]
+        shr     cx, 9
+        movzx   ecx, cx
+        add     eax, ecx
+        mov     [.lba], eax
 
         mov     ax, [.coff]
         and     ax, SECTOR_SIZE - 1
@@ -1141,8 +1153,9 @@ file_write:
         ; セクタをバッファに載せる。セクタの一部だけを書き換える場合、
         ; 残りは元の内容でなければならないので、必ず先に読んでおく。
         push    si
-        mov     ax, [.lba]
-        mov     dl, [cur_drive]
+        mov     eax, [.lba]
+        mov     dl, [si + SFT_DEVINFO]
+        and     dl, SFTI_DRIVE
         call    buf_get
         mov     [.bufptr], si
         pop     si
@@ -1258,7 +1271,7 @@ file_write:
 .coff:   dw 0
 .soff:   dw 0
 .chunk:  dw 0
-.lba:    dw 0
+.lba:    dd 0
 .bufptr: dw 0
 
 ; ---------------------------------------------------------------------------
@@ -1378,11 +1391,17 @@ file_delete:
 ; ---------------------------------------------------------------------------
 sft_bind_file:
         push    ax
+        push    bx
         ; ブロックデバイス。下位 6bit がドライブ番号 (0 = A:)
-        mov     word [si + SFT_DEVINFO], SFTI_CLEAN
-        mov     word [si + SFT_DEVPTR], dpb
+        movzx   ax, byte [fs_drive]
+        or      ax, SFTI_CLEAN
+        mov     [si + SFT_DEVINFO], ax
+        mov     al, [fs_drive]
+        call    dpb_for_drive           ; BX = そのドライブの DPB
+        mov     [si + SFT_DEVPTR], bx
         mov     ax, cs
         mov     [si + SFT_DEVPTR + 2], ax
+        pop     bx
         mov     ax, [cur_psp]
         mov     [si + SFT_OWNER], ax
         pop     ax

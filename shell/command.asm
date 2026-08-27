@@ -68,8 +68,14 @@ show_banner:
 ; show_prompt - "A:\CURRENT>" を表示する
 ; ---------------------------------------------------------------------------
 show_prompt:
-        mov     si, str_drive           ; "A:\"
-        call    puts
+        mov     ah, 0x19                ; カレントドライブ
+        int     0x21
+        add     al, 'A'
+        call    putc
+        mov     al, ':'
+        call    putc
+        mov     al, '\'
+        call    putc
 
         mov     si, cwd_buf
         mov     ah, 0x47                ; カレントディレクトリの取得
@@ -147,6 +153,32 @@ exec_line_at:
         call    streq
         je      .done
         mov     si, [args_ptr]
+
+        ; "C:" のようにドライブ名だけを打たれたら切り替える。
+        ; 内部コマンドの表より先に見る (DOS もそうしている)。
+        mov     si, cmd_buf
+        cmp     byte [si + 1], ':'
+        jne     .not_drive
+        cmp     byte [si + 2], 0
+        jne     .not_drive
+        mov     al, [si]
+        cmp     al, 'A'
+        jb      .not_drive
+        cmp     al, 'Z'
+        ja      .not_drive
+        sub     al, 'A'
+        mov     dl, al
+        mov     ah, 0x0E                ; ドライブ選択
+        int     0x21
+        ; 切り替わったか確かめる。無効なドライブは黙って戻さない。
+        mov     ah, 0x19
+        int     0x21
+        cmp     al, dl
+        je      .done
+        mov     si, msg_bad_drive
+        call    puts
+        jmp     .done
+.not_drive:
 
         ; 内部コマンドの表を引く
         mov     bx, cmd_table
@@ -256,8 +288,7 @@ cmd_dir:
         call    strcpy
 .no_append:
 
-        mov     si, msg_dir_head
-        call    puts
+        call    show_dir_head
 
         mov     dword [file_count], 0
         mov     dword [byte_count], 0
@@ -1405,6 +1436,33 @@ put_hex16:
         pop     ax
         ret
 
+; ---------------------------------------------------------------------------
+; show_dir_head - DIR の見出し " Directory of X:\PATH" を出す
+; ---------------------------------------------------------------------------
+show_dir_head:
+        mov     si, msg_dir_head
+        call    puts
+
+        mov     ah, 0x19
+        int     0x21
+        add     al, 'A'
+        call    putc
+        mov     al, ':'
+        call    putc
+        mov     al, '\'
+        call    putc
+
+        mov     si, cwd_buf
+        mov     ah, 0x47
+        mov     dl, 0
+        int     0x21
+        mov     si, cwd_buf
+        call    puts
+
+        mov     si, msg_crlf2
+        call    puts
+        ret
+
 ; ============================================================================
 ; 内部コマンドの表
 ; ============================================================================
@@ -1457,9 +1515,12 @@ str_exit:   db 'EXIT', 0
 ; ============================================================================
 msg_banner:     db 'MYDOS Command Interpreter', 13, 10
                 db 'Type a command. Internal: DIR CD MD RD TYPE COPY DEL REN', 13, 10
-                db '                          CLS VER ECHO DATE TIME MEM EXIT', 13, 10, 13, 10, 0
+                db '                          CLS VER ECHO DATE TIME MEM EXIT', 13, 10
+                db 'Type a drive letter with a colon (C:) to change drives.', 13, 10, 13, 10, 0
 msg_ver:        db 'MYDOS Version ', 0
-msg_dir_head:   db 13, 10, ' Directory of A:\', 13, 10, 13, 10, 0
+msg_dir_head:   db 13, 10, ' Directory of ', 0
+msg_crlf2:      db 13, 10, 13, 10, 0
+msg_bad_drive:  db 'Invalid drive specification', 13, 10, 0
 msg_dir_tag:    db '     <DIR>', 0
 msg_files:      db ' file(s)', 13, 10, 0
 msg_bytes:      db ' bytes', 13, 10, 0
