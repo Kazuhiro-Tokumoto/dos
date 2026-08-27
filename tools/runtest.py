@@ -28,7 +28,12 @@ REQUIRED = [
     ("MYDOS - an MS-DOS compatible", "TYPE によるファイル表示"),
     ("1 file(s) copied", "COPY"),
     ("bytes in largest free block", "MEM (MCB 連鎖の走査)"),
+    ("TSR-RESIDENT: PASS", "AH=31h 常駐終了が本当に残っている"),
+    ("OVERLAY-RELOC: PASS", "AH=4Bh AL=3 オーバーレイのリロケーション"),
 ]
+
+# DOSTEST と FCBTEST の 2 本が、それぞれ集計行と終了の目印を出す。
+EXPECTED_SUITES = 2
 
 
 def run(image, timeout, qemu, keep_log):
@@ -56,7 +61,7 @@ def run(image, timeout, qemu, keep_log):
             if os.path.exists(log_path):
                 with open(log_path, "rb") as f:
                     text = f.read().decode("latin-1")
-                if END_MARKER in text:
+                if text.count(END_MARKER) >= EXPECTED_SUITES:
                     break
             time.sleep(0.25)
     finally:
@@ -78,18 +83,21 @@ def run(image, timeout, qemu, keep_log):
     if not keep_log and os.path.exists(log_path):
         os.remove(log_path)
 
-    if END_MARKER not in text:
-        print(f"\n判定: 失敗 — {timeout} 秒以内にテストが終わらなかった")
+    if text.count(END_MARKER) < EXPECTED_SUITES:
+        print(f"\n判定: 失敗 — {timeout} 秒以内に "
+              f"{EXPECTED_SUITES} 本のテストが終わらなかった "
+              f"(終了したのは {text.count(END_MARKER)} 本)")
         if not text.strip():
             print("      シリアルに何も出ていない。ブートの段階で止まっている可能性がある。")
         return 1
 
-    m = RESULT_RE.search(text)
-    if not m:
-        print("\n判定: 失敗 — 集計行が見つからない")
+    results = RESULT_RE.findall(text)
+    if len(results) < EXPECTED_SUITES:
+        print(f"\n判定: 失敗 — 集計行が {len(results)} 本ぶんしか見つからない")
         return 1
 
-    npass, nfail = int(m.group(1)), int(m.group(2))
+    npass = sum(int(a) for a, _ in results)
+    nfail = sum(int(b) for _, b in results)
 
     missing = [(needle, label) for needle, label in REQUIRED if needle not in text]
     for needle, label in missing:

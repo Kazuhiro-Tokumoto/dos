@@ -1,8 +1,13 @@
 # MYDOS
 
-MS-DOS 互換のディスクオペレーティングシステム。16bit x86 リアルモードで動く
-本物の OS で、ブートセクタからカーネル、コマンドインタプリタまで NASM で
-書いてある。当時の `.COM` / `.EXE` がそのまま動くことを目標にしている。
+**MS-DOS 6.22 互換**を目標にしたディスクオペレーティングシステム。
+16bit x86 リアルモードで動く本物の OS で、ブートセクタからカーネル、
+コマンドインタプリタまで NASM で書いてある。当時の `.COM` / `.EXE` が
+そのまま動くことを目標にしている。
+
+**INT 21h は 6.22 の 103 機能をすべて実装済み**（FCB 系、常駐終了、
+オーバーレイ、拡張オープンを含む）。ただし「完全互換」にはまだ
+CONFIG.SYS・デバイスドライバ・HMA/UMB・FAT16 が要る（[まだやっていないこと](#まだやっていないこと)）。
 
 ```
 $ make            # イメージを作る
@@ -41,9 +46,11 @@ Segment      Size  Owner
   ディレクトリの自動拡張に対応
 - **メモリ管理**: メモリ上に実在する MCB 連鎖 (`M`/`Z`、所有者 PSP、サイズ)
 - **プログラム実行**: `.COM` と `.EXE` (MZ ヘッダ解析、リロケーション適用、
-  `min_alloc` / `max_alloc` に従うメモリ確保)
-- **プロセス**: 完全な PSP、`AH=4Bh` EXEC、`AH=4Ch` 終了、親子関係、
-  終了時のメモリ・ファイルの自動回収
+  `min_alloc` / `max_alloc` に従うメモリ確保)、オーバーレイ (`AH=4Bh AL=3`)
+- **プロセス**: 完全な PSP、`AH=4Bh` EXEC、`AH=4Ch` 終了、`AH=31h` 常駐終了、
+  親子関係、終了時のメモリ・ファイルの自動回収
+- **ファイル入出力**: ハンドル系 (SFT / JFT の 2 段構え) と **FCB 系の両方**
+- **ドライブ情報**: 本物の形の DPB (`AH=32h`)、List of Lists (`AH=52h`)
 - **シェル**: `COMMAND.COM` (カーネルの一部ではなく、ただの `.COM`)、
   `AUTOEXEC.BAT` と `.BAT` の実行
 
@@ -68,6 +75,7 @@ js/                 引き継ぎ元のブラウザ実装 (仕様の参照用。�
 | `fat12.inc` | FAT の読み書き、クラスタ確保、ディレクトリ走査、パス解決 |
 | `mem.inc` | MCB の確保・分割・結合・解放、確保戦略 |
 | `file.inc` | SFT / JFT、ハンドルによるファイル入出力、文字デバイス |
+| `fcb.inc` | FCB 系 16 機能 (レコード単位の入出力、`AH=29h` の名前解析) |
 | `dirops.inc` | MKDIR / RMDIR / CHDIR / 検索 / 名前変更 / 属性 |
 | `exec.inc` | PSP 構築、環境ブロック、`.COM` / `.EXE` ローダ、EXEC と終了 |
 | `int21.inc` | INT 21h のジャンプテーブルと各機能 |
@@ -118,20 +126,24 @@ $ fsck.fat -n build/dos.img       # 整合性を検査する
 
 ## INT 21h の実装状況
 
+**MS-DOS 6.22 の 103 機能をすべて実装済み。**
+
 | | 機能 |
 |---|---|
 | 文字入出力 | `01` `02` `03` `04` `05` `06` `07` `08` `09` `0A` `0B` `0C` |
-| ディスク | `0D` `0E` `19` `36` |
+| **FCB 系** | `0F` `10` `11` `12` `13` `14` `15` `16` `17` `21` `22` `23` `24` `27` `28` `29` |
+| ディスク | `0D` `0E` `19` `1B` `1C` `32` `36` `53` `69` |
 | DTA | `1A` `2F` |
 | ベクタ | `25` `35` |
 | 日時 | `2A` `2B` `2C` `2D` |
-| システム | `30` `31` `33` `34` `38` `52` `54` `58` `59` `2E` |
-| ディレクトリ | `39` `3A` `3B` `47` |
-| ファイル | `3C` `3D` `3E` `3F` `40` `41` `42` `43` `56` `57` |
+| システム | `18` `2E` `30` `33` `34` `37` `38` `52` `54` `58` `59` `63` `64` `65` `66` `67` `6B` |
+| ディレクトリ | `39` `3A` `3B` `47` `60` |
+| ファイル | `3C` `3D` `3E` `3F` `40` `41` `42` `43` `56` `57` `5A` `5B` `5C` `68` `6A` `6C` |
 | ハンドル | `44` `45` `46` |
 | メモリ | `48` `49` `4A` |
-| プロセス | `00` `4B` `4C` `4D` `50` `51` `62` |
+| プロセス | `00` `26` `31` `4B` `4C` `4D` `50` `51` `55` `62` |
 | 検索 | `4E` `4F` |
+| ネットワーク | `5D` `5E` `5F` (ネットワークが無いので機能なしを返す) |
 
 その他の割り込み: `INT 20h` (終了)、`INT 22h` (終了アドレス)、
 `INT 23h` (Ctrl-C)、`INT 24h` (クリティカルエラー)、`INT 25h` / `26h`
@@ -153,19 +165,42 @@ $ make test
 - `HELLO.COM` — `.COM` の起動
 - `HELLO.EXE` — `.EXE` の起動と、**自分のリロケーションが当たっているかの自己検査**
 - `TYPE` / `COPY` / `DEL` / `DIR` / `MEM` — シェルの内部コマンド
-- `DOSTEST.COM` — INT 21h の 10 項目
+- `TSRTEST.COM` を 2 回 — 1 回目に `INT 60h` を横取りして常駐し、
+  2 回目に**そのハンドラがまだ生きているか**を確かめる
+- `OVLTEST.COM` — オーバーレイを読み込み、指定した係数でリロケーションが
+  当たっているかを確かめてから far call する
+- `FCBTEST.COM ALPHA BETA` — FCB 系と 6.22 追加分の 15 項目
+- `DOSTEST.COM` — ハンドル系 INT 21h の 10 項目
 
 ```
-  [PASS] AH=30h  DOS version
+  [PASS] PSP:5C / PSP:6C  command tail parsed into FCBs by EXEC
+  [PASS] AH=29h  parse filename
+  [PASS] AH=16h/15h/10h  FCB create and sequential write
+  [PASS] AH=0Fh/14h  FCB open and sequential read
+  [PASS] AH=23h  FCB file size in records
+  [PASS] AH=21h/22h/24h  FCB random read, write, set record
+  [PASS] AH=27h  FCB random block read
+  [PASS] AH=11h/12h  FCB find first and next
+  [PASS] AH=17h  FCB rename
+  [PASS] AH=13h  FCB delete
+  [PASS] AH=32h  drive parameter block matches the BPB
+  [PASS] AH=1Bh  allocation info
+  [PASS] AH=5Bh  create new file, fail if it exists
+  [PASS] AH=6Ch  extended open and create
+  [PASS] AH=60h  truename canonicalises paths
+
+  [PASS] AH=30h  DOS version is 6.22
   [PASS] AH=3Ch/40h/3Dh/3Fh  small file round trip
   [PASS] AH=40h/3Fh  3000-byte file across clusters
   [PASS] AH=42h  seek from end and from start
   [PASS] AH=4Eh/4Fh  FindFirst / FindNext
   [PASS] AH=39h/3Bh/47h/3Ah  directory create, enter, remove
   [PASS] AH=48h/49h/4Ah  memory allocate, resize, free
-  [PASS] AH=56h  rename
-  [PASS] AH=41h  delete
-  [PASS] AH=36h  free disk space
+  [PASS] AH=56h  rename / AH=41h  delete / AH=36h  free disk space
+
+  [PASS] .COM / .EXE の起動と .EXE のリロケーション適用
+  [PASS] AH=31h 常駐終了が本当に残っている
+  [PASS] AH=4Bh AL=3 オーバーレイのリロケーション
 ```
 
 テストが書いたファイルは実際のディスクイメージに残るので、走らせたあとに
@@ -196,14 +231,62 @@ $ make js-test
 
 ## まだやっていないこと
 
-- **FCB 系** (`0F`-`18`, `21`-`24`, `27`-`28`)。ハンドル系より古い
-  ファイル指定方法で、DOS 1.x 時代のプログラムが使う
-- **本物の TSR**。`INT 27h` と `AH=31h` は受け付けるが常駐部分を残さない
-- **`AH=4Bh` の AL=1 / AL=3** (ロードのみ / オーバーレイ)
-- **`CONFIG.SYS`** とデバイスドライバの読み込み
-- **複数ドライブ**。いまは A: のみ
-- **`INT 24h` の対話** (中止/再試行/無視)。常に「失敗」を返す
-- **バッチの入れ子**、`FOR` / `IF` / `GOTO` / `SET`
+INT 21h の面はすべて埋まったが、「6.22 と完全互換」と言うにはまだ
+以下が要る。効いてくる順に並べてある。
+
+### A. 内部データ構造を本物の形にする
+
+当時のツール (メモリマネージャ、常駐ソフト、ファイラ、デバッガ) は
+DOS の内部構造を直接辿る。いまは `AH=52h` から DPB と MCB 連鎖には
+届くが、以下がまだ本物の形になっていない。
+
+- **SFT** — いまは独自の 48 バイト形式。DOS 4.0 以降の 59 バイト形式にし、
+  List of Lists から連鎖で辿れるようにする必要がある
+- **CDS** (Current Directory Structure) — ドライブごとのカレントディレクトリ
+  の配列。`LASTDRIVE` と複数ドライブの土台でもある
+- **デバイスドライバのヘッダ連鎖** — NUL → CON → AUX → PRN → CLOCK$ →
+  ブロックデバイスの並び。`AH=52h` の +0Ch が指す先
+- **ディスクバッファ連鎖** — `BUFFERS=` の実体
+
+### B. 起動時の構成
+
+- **CONFIG.SYS** — `DEVICE=` `FILES=` `BUFFERS=` `LASTDRIVE=` `SHELL=`
+  `STACKS=` `DOS=`
+- **インストール可能デバイスドライバ** (`.SYS` の読み込みとヘッダ登録)
+
+### C. メモリ
+
+- **HMA** (`DOS=HIGH`) — A20 を開けて `0xFFFF:0x0010` 以降の 64KB を使う。
+  6.22 でカーネル本体が常駐メモリを食わない理由がこれ
+- **UMB** (`DOS=UMB`) — EMM386 相当が要るので V86 モードの実装が前提
+- **XMS** (HIMEM.SYS 相当)
+
+### D. ストレージ
+
+- **FAT16 とハードディスク** — パーティションテーブル、複数ドライブ、
+  32MB 超のボリューム
+- **INT 13h 拡張** (LBA)
+
+### E. COMMAND.COM
+
+- **環境変数** — `SET` / `PATH` / `PROMPT` と `%VAR%` の展開
+- **リダイレクトとパイプ** — `>` `>>` `<` `|`
+  (`AH=45h`/`46h` は実装済みなので土台はある)
+- **バッチの制御構造** — `FOR` `IF` `GOTO` `CALL` `SHIFT` `CHOICE`、入れ子
+
+### F. 外部コマンド
+
+`FORMAT` `FDISK` `SYS` `XCOPY` `CHKDSK` `SCANDISK` `MORE` `SORT` `FIND`
+`EDIT` `DOSKEY` `LABEL` `TREE` `ATTRIB` `DEBUG` など。6.22 の配布物に
+入っていたもの一式。
+
+### G. その他
+
+- **`INT 24h` の対話** — いまは常に「失敗」を返す。本物は
+  「中止/再試行/無視/失敗」を聞いてくる
+- **SHARE とファイルロック** — `AH=5Ch` はいま常に成功を返すだけ
+- **ネットワークリダイレクタ** (`INT 2Fh AH=11h`)
+- **国別情報とコードページの実体** — `AH=38h`/`65h`/`66h` は形だけ返している
 
 ## 対象 CPU
 

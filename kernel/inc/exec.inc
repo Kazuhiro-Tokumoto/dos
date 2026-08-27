@@ -37,6 +37,14 @@ EPB_ENVSEG      equ 0x00        ; word: 環境セグメント (0 なら親のを
 EPB_CMDTAIL     equ 0x02        ; dword: コマンドテイルへのポインタ
 EPB_FCB1        equ 0x06        ; dword
 EPB_FCB2        equ 0x0A        ; dword
+; AL=1 (ロードのみ) のとき、DOS がここに結果を書き戻す
+EPB_INITSP      equ 0x0E        ; word: 初期 SP
+EPB_INITSS      equ 0x10        ; word: 初期 SS
+EPB_INITIP      equ 0x12        ; word: 初期 IP
+EPB_INITCS      equ 0x14        ; word: 初期 CS
+; AL=3 (オーバーレイ) のときは意味が変わる
+EPB_OVL_SEG     equ 0x00        ; word: 読み込み先セグメント
+EPB_OVL_FACTOR  equ 0x02        ; word: リロケーション係数
 
 ; ---------------------------------------------------------------------------
 ; build_psp - PSP を組み立てる
@@ -634,6 +642,12 @@ prog_load:
         pop     ds
 .no_tail:
 
+        ; コマンドテイルの最初の 2 語を解析して PSP:5C と PSP:6C に置く。
+        ; DOS がここを埋めてくれる前提で書かれたプログラムがあるので、
+        ; 空のままにはできない。
+        mov     ax, [.psp]
+        call    psp_set_fcbs
+
         pop     es
         pop     si
         pop     dx
@@ -688,8 +702,14 @@ prog_load:
         add     ax, [reloc_entry + 2]
         mov     es, ax
         mov     di, [reloc_entry]
+        ; 通常はロード先セグメントを足すが、オーバーレイのときは
+        ; 呼び出し元が指定したリロケーション係数を使う。
+        mov     ax, [reloc_factor]
+        cmp     ax, 0xFFFF
+        jne     .use_factor
         mov     ax, [prog_load.loadseg]
-        add     [es:di], ax             ; 埋め込まれた値にロード先を足す
+.use_factor:
+        add     [es:di], ax             ; 埋め込まれた値にセグメントを足す
 
         dec     word [.nrelocs]
         jmp     .reloc_loop
@@ -726,6 +746,172 @@ prog_load:
 .imgparas:  dw 0
 .minparas:  dw 0
 .maxparas:  dw 0
+
+; ---------------------------------------------------------------------------
+; psp_set_fcbs - コマンドテイルの最初の 2 語を PSP の FCB 欄に解析して入れる
+;   入力: AX = PSP セグメント
+;
+; DOS は EXEC のときにこれをやる。AH=29h と同じ解析器を使う。
+; ---------------------------------------------------------------------------
+psp_set_fcbs:
+        push    ax
+        push    cx
+        push    si
+        push    di
+        push    ds
+        push    es
+
+        mov     es, ax
+        mov     ds, ax                  ; コマンドテイルも PSP の中にある
+
+        mov     si, PSP_CMDTAIL
+        mov     di, PSP_FCB1
+        mov     byte [cs:f_29.opts], 0x01       ; 先頭の区切りを飛ばす
+        call    fcb_parse
+
+        mov     di, PSP_FCB2
+        mov     byte [cs:f_29.opts], 0x01
+        call    fcb_parse
+
+        pop     es
+        pop     ds
+        pop     di
+        pop     si
+        pop     cx
+        pop     ax
+        ret
+
+; ---------------------------------------------------------------------------
+; prog_load_overlay - オーバーレイを読み込む (AH=4Bh AL=3)
+;   入力: DS:SI = パス, AX = ロード先セグメント, DX = リロケーション係数
+;   出力: CF=1 なら AX = エラーコード
+;
+; PSP を作らず、メモリも確保しない。指定されたセグメントに中身を置いて
+; リロケーションを当てるだけ。当時の大きめのアプリ (Turbo Pascal や
+; Microsoft C のオーバーレイ) が、常駐部分から呼び出す形で使う。
+; ---------------------------------------------------------------------------
+prog_load_overlay:
+        push    bx
+        push    cx
+        push    dx
+        push    di
+        push    es
+
+        mov     [.loadseg], ax
+        mov     [.relocfac], dx
+
+        xor     al, al
+        call    file_open
+        jc      .err
+        mov     [.handle], ax
+        mov     bx, ax
+
+        push    ds
+        pop     es
+        mov     di, exe_header
+        mov     cx, MZ_HDRSIZE
+        call    file_read
+        jc      .read_err
+
+        cmp     ax, MZ_HDRSIZE
+        jb      .flat
+        mov     ax, [exe_header + MZ_SIGNATURE]
+        cmp     ax, MZ_MAGIC
+        je      .mz
+        cmp     ax, MZ_MAGIC_ALT
+        jne     .flat
+
+.mz:
+        ; イメージの大きさを求める (prog_load と同じ計算)
+        movzx   eax, word [exe_header + MZ_PAGES]
+        shl     eax, 9
+        movzx   ecx, word [exe_header + MZ_LASTPAGE]
+        test    ecx, ecx
+        jz      .full_page
+        sub     eax, SECTOR_SIZE
+        add     eax, ecx
+.full_page:
+        movzx   ecx, word [exe_header + MZ_HDRPARAS]
+        shl     ecx, 4
+        mov     [.hdrbytes], ecx
+        sub     eax, ecx
+        jbe     .bad
+        mov     [.imgsize], eax
+
+        ; ヘッダの直後へシークして本体を読む
+        mov     bx, [.handle]
+        xor     al, al
+        mov     edx, [.hdrbytes]
+        mov     ecx, edx
+        shr     ecx, 16
+        call    file_seek
+        jc      .read_err
+
+        mov     dx, [.loadseg]
+        mov     bx, [.handle]
+        mov     ecx, [.imgsize]
+        call    file_read_big
+        jc      .read_err
+
+        ; リロケーションを当てる。足す値はロード先ではなく、
+        ; 呼び出し元が指定したリロケーション係数。
+        mov     ax, [.loadseg]
+        mov     [prog_load.loadseg], ax
+        mov     ax, [.relocfac]
+        mov     [reloc_factor], ax
+        mov     ax, [.handle]
+        mov     [prog_load.handle], ax
+        call    prog_load.apply_relocs
+        mov     word [reloc_factor], 0xFFFF     ; 既定 (= ロード先を使う) に戻す
+        jc      .read_err
+        jmp     .done
+
+.flat:
+        ; .COM 形式のオーバーレイ。先頭から丸ごと読むだけ
+        mov     bx, [.handle]
+        xor     al, al
+        xor     cx, cx
+        xor     dx, dx
+        call    file_seek
+        mov     dx, [.loadseg]
+        mov     bx, [.handle]
+        mov     ecx, 0x0000FF00
+        call    file_read_big
+        jc      .read_err
+
+.done:
+        mov     bx, [.handle]
+        call    file_close
+        xor     ax, ax
+        clc
+        jmp     .out
+
+.bad:
+        mov     ax, ERR_BAD_FORMAT
+        jmp     .close_err
+.read_err:
+        mov     ax, ERR_BAD_DATA
+.close_err:
+        push    ax
+        mov     bx, [.handle]
+        call    file_close
+        pop     ax
+        stc
+        jmp     .out
+.err:
+        stc
+.out:
+        pop     es
+        pop     di
+        pop     dx
+        pop     cx
+        pop     bx
+        ret
+.handle:   dw 0
+.loadseg:  dw 0
+.relocfac: dw 0
+.imgsize:  dd 0
+.hdrbytes: dd 0
 
 ; ---------------------------------------------------------------------------
 ; do_exec - AH=4Bh の本体。子プロセスを読み込んで制御を渡す
@@ -843,6 +1029,22 @@ exec_return:
         jmp     int21_exit
 
 ; ---------------------------------------------------------------------------
+; do_tsr - AH=31h / INT 27h の本体 (常駐終了)
+;   入力: AX = 終了コード, DX = 残すパラグラフ数
+;
+; 普通の終了との違いは 2 つだけ:
+;   * 確保したメモリを解放せず、指定されたパラグラフ数まで縮めて残す
+;   * 開いているファイルを閉じない
+; 割り込みベクタは PSP から書き戻すが、常駐ソフトが自分で書き換えた
+; INT 9h や INT 1Ch はそのまま生き続ける (PSP に保存されているのは
+; 22h/23h/24h の 3 本だけなので)。これが常駐の仕組みそのもの。
+; ---------------------------------------------------------------------------
+do_tsr:
+        mov     [term_keep_paras], dx
+        mov     byte [term_keep], 1
+        jmp     do_terminate.entry
+
+; ---------------------------------------------------------------------------
 ; do_terminate - AH=4Ch / INT 20h の本体
 ;   入力: AL = 終了コード, AH = 終了の種類 (0=通常, 3=TSR)
 ;
@@ -855,14 +1057,19 @@ exec_return:
 ;   6. (書き戻した) INT 22h の先へジャンプする
 ; ---------------------------------------------------------------------------
 do_terminate:
+        mov     byte [term_keep], 0
+.entry:
         cli
         mov     [last_exit_code], ax
 
         mov     ax, [cur_psp]
         mov     [.psp], ax
 
-        ; --- 開いているファイルを閉じる ---
+        ; --- 開いているファイルを閉じる (常駐する場合は開いたまま残す) ---
+        cmp     byte [term_keep], 0
+        jne     .keep_files
         call    .close_files
+.keep_files:
 
         ; --- FAT を書き戻しておく ---
         call    disk_flush_fat
@@ -886,10 +1093,25 @@ do_terminate:
         mov     ax, [es:PSP_PARENT]
         mov     [.parent], ax
 
-        ; --- メモリを解放する ---
+        ; --- メモリを解放する (常駐する場合は縮めて残す) ---
+        cmp     byte [term_keep], 0
+        jne     .keep_memory
         mov     ax, [.psp]
         call    mem_free_owner
+        jmp     .to_parent
 
+.keep_memory:
+        push    es
+        mov     es, [.psp]
+        mov     bx, [term_keep_paras]
+        cmp     bx, PSP_SIZE / 16
+        jae     .paras_ok
+        mov     bx, PSP_SIZE / 16       ; PSP のぶんは最低でも残す
+.paras_ok:
+        call    mem_resize
+        pop     es
+
+.to_parent:
         ; --- 親に戻る ---
         mov     ax, [.parent]
         mov     [cur_psp], ax
@@ -939,6 +1161,8 @@ do_terminate:
 
 ; --- 変数 ------------------------------------------------------------------
 cur_psp:            dw 0        ; いま動いているプロセスの PSP
+term_keep:          db 0        ; 1 なら常駐終了 (メモリとファイルを残す)
+term_keep_paras:    dw 0        ; 常駐で残すパラグラフ数
 last_exit_code:     dw 0        ; AH=4Dh が返す値 (AL=コード, AH=種類)
 exec_psp:           dw 0
 exec_entry:         dd 0        ; 子の入口 (offset, segment)
@@ -947,3 +1171,4 @@ exec_envseg:        dw 0
 exec_psp_cmdsrc:    dd 0        ; コマンドテイルへの far ポインタ
 exe_header:         times MZ_HDRSIZE db 0
 reloc_entry:        dd 0
+reloc_factor:       dw 0xFFFF   ; FFFFh = ロード先セグメントをそのまま使う

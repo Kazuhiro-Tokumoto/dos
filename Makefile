@@ -34,7 +34,9 @@ KERNEL_DBG := $(BUILD)/io-debug.sys
 SHELL_COM := $(BUILD)/command.com
 
 # ディスクに入れるテストプログラム
-PROGS := $(BUILD)/hello.com $(BUILD)/hello.exe $(BUILD)/dostest.com
+PROGS := $(BUILD)/hello.com $(BUILD)/hello.exe $(BUILD)/dostest.com \
+         $(BUILD)/fcbtest.com $(BUILD)/tsrtest.com $(BUILD)/ovltest.com \
+         $(BUILD)/ovl.ovl
 
 KDEPS := kernel/io.asm $(wildcard $(INCDIR)/*.inc)
 
@@ -71,6 +73,11 @@ $(BUILD)/hello.exe: tests/hellox.asm tools/mkexe.py | $(BUILD)
 	$(NASM) $(NASMFLAGS) tests/hellox.asm -o $(BUILD)/hellox.bin
 	$(PYTHON) tools/mkexe.py $(BUILD)/hellox.bin -o $@ -v
 
+# オーバーレイも MZ 形式。AH=4Bh AL=3 はリロケーションだけを当てる。
+$(BUILD)/ovl.ovl: tests/ovlbody.asm tools/mkexe.py | $(BUILD)
+	$(NASM) $(NASMFLAGS) tests/ovlbody.asm -o $(BUILD)/ovlbody.bin
+	$(PYTHON) tools/mkexe.py $(BUILD)/ovlbody.bin -o $@ -v
+
 # --- イメージの組み立て -----------------------------------------------------
 #
 # mkimage.py がブートセクタと Stage2 を置いて FAT を初期化する。
@@ -84,6 +91,10 @@ define make_image
 	$(MCOPY) -i $(1) -o $(BUILD)/hello.com ::HELLO.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/hello.exe ::HELLO.EXE
 	$(MCOPY) -i $(1) -o $(BUILD)/dostest.com ::DOSTEST.COM
+	$(MCOPY) -i $(1) -o $(BUILD)/fcbtest.com ::FCBTEST.COM
+	$(MCOPY) -i $(1) -o $(BUILD)/tsrtest.com ::TSRTEST.COM
+	$(MCOPY) -i $(1) -o $(BUILD)/ovltest.com ::OVLTEST.COM
+	$(MCOPY) -i $(1) -o $(BUILD)/ovl.ovl ::OVL.OVL
 	$(MCOPY) -i $(1) -o tests/readme.txt ::README.TXT
 	$(MCOPY) -i $(1) -o $(3) ::AUTOEXEC.BAT
 endef

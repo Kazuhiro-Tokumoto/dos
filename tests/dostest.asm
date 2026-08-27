@@ -79,7 +79,9 @@ t_version:
         call    begin
         mov     ah, 0x30
         int     0x21
-        cmp     al, 5                   ; MYDOS は 5.0 を名乗る
+        cmp     al, 6                   ; MYDOS は 6.22 を名乗る
+        jne     .fail
+        cmp     ah, 22
         jne     .fail
         jmp     pass
 .fail:
@@ -688,7 +690,7 @@ str_indent:     db '  ', 0
 str_pass:       db '[PASS] ', 0
 str_fail:       db '[FAIL] ', 0
 
-n_version:      db 'AH=30h  DOS version', 0
+n_version:      db 'AH=30h  DOS version is 6.22', 0
 n_small:        db 'AH=3Ch/40h/3Dh/3Fh  small file round trip', 0
 n_big:          db 'AH=40h/3Fh  3000-byte file across clusters', 0
 n_seek:         db 'AH=42h  seek from end and from start', 0

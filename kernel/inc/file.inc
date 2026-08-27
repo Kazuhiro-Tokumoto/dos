@@ -751,6 +751,22 @@ file_cluster_at:
 .grow:  dw 0
 
 ; ---------------------------------------------------------------------------
+; sft_read - SFT を直接指定して読む
+;   入力: SI = SFT, CX = バイト数, ES:DI = バッファ
+;   出力: CF=0 なら AX = 実際に読んだバイト数
+;
+; FCB 系のファンクションはハンドル (JFT) を経由しないので、ここから入る。
+; ハンドル版との違いは入口だけで、以降の処理は完全に共通。
+; ---------------------------------------------------------------------------
+sft_read:
+        push    bx
+        push    cx
+        push    dx
+        push    si
+        push    di
+        jmp     file_read.have_sft
+
+; ---------------------------------------------------------------------------
 ; file_read - ハンドルから読む
 ;   入力: BX = ハンドル, CX = バイト数, ES:DI = バッファ
 ;   出力: CF=0 なら AX = 実際に読んだバイト数
@@ -766,6 +782,7 @@ file_read:
         call    jft_get
         jc      .bad_handle
 
+.have_sft:
         cmp     byte [si + SFT_DEVICE], SFT_DEV_FILE
         jne     .device
 
@@ -948,6 +965,19 @@ con_read_block:
         ret
 
 ; ---------------------------------------------------------------------------
+; sft_write - SFT を直接指定して書く (FCB 系が使う)
+;   入力: SI = SFT, CX = バイト数, ES:DI = データ
+;   出力: CF=0 なら AX = 実際に書いたバイト数
+; ---------------------------------------------------------------------------
+sft_write:
+        push    bx
+        push    cx
+        push    dx
+        push    si
+        push    di
+        jmp     file_write.have_sft
+
+; ---------------------------------------------------------------------------
 ; file_write - ハンドルへ書く
 ;   入力: BX = ハンドル, CX = バイト数, ES:DI = データ
 ;   出力: CF=0 なら AX = 実際に書いたバイト数
@@ -965,6 +995,7 @@ file_write:
         call    jft_get
         jc      .bad_handle
 
+.have_sft:
         cmp     byte [si + SFT_DEVICE], SFT_DEV_FILE
         jne     .device
 

@@ -184,9 +184,33 @@ FIND_DATE       equ 0x18        ; word
 FIND_SIZE       equ 0x1A        ; dword
 FIND_NAME       equ 0x1E        ; 13 バイト: "NAME.EXT" + 0 終端
 
+; --- DPB (Drive Parameter Block) --------------------------------------------
+;
+; DOS がドライブごとに持つ構造体。AH=32h でそのまま渡され、
+; List of Lists からも連鎖で辿れる。当時のディスクツールはここを読む。
+DPB_DRIVE       equ 0x00        ; byte: ドライブ番号 (0 = A:)
+DPB_UNIT        equ 0x01        ; byte: ドライバ内のユニット番号
+DPB_SECSIZE     equ 0x02        ; word: セクタあたりバイト数
+DPB_CLUSMASK    equ 0x04        ; byte: クラスタ内の最大セクタ番号 (spc - 1)
+DPB_CLUSSHIFT   equ 0x05        ; byte: クラスタ→セクタのシフト量
+DPB_RESERVED    equ 0x06        ; word: 予約セクタ数
+DPB_NUMFATS     equ 0x08        ; byte: FAT の数
+DPB_ROOTENT     equ 0x09        ; word: ルートディレクトリのエントリ数
+DPB_DATASEC     equ 0x0B        ; word: データ領域の開始セクタ
+DPB_MAXCLUS     equ 0x0D        ; word: 最大クラスタ番号 (データクラスタ数 + 1)
+DPB_SECPERFAT   equ 0x0F        ; word: FAT 1 個のセクタ数
+DPB_DIRSEC      equ 0x11        ; word: ルートディレクトリの開始セクタ
+DPB_DRIVER      equ 0x13        ; dword: デバイスドライバのヘッダ
+DPB_MEDIA       equ 0x17        ; byte: メディアディスクリプタ
+DPB_ACCESS      equ 0x18        ; byte: 0 = アクセス済み, FFh = 未
+DPB_NEXT        equ 0x19        ; dword: 次の DPB
+DPB_FREESRCH    equ 0x1D        ; word: 空き探索の開始クラスタ
+DPB_FREECNT     equ 0x1F        ; word: 空きクラスタ数 (FFFFh = 不明)
+DPB_SIZE        equ 0x21
+
 ; --- その他 -----------------------------------------------------------------
 SECTOR_SIZE     equ 512
-DOS_VER_MAJOR   equ 5
-DOS_VER_MINOR   equ 0
+DOS_VER_MAJOR   equ 6
+DOS_VER_MINOR   equ 22
 
 SERIAL_BASE     equ 0x3F8       ; COM1

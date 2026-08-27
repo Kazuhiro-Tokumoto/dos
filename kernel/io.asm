@@ -482,6 +482,7 @@ int26_handler:
 %include "fat12.inc"
 %include "mem.inc"
 %include "file.inc"
+%include "fcb.inc"
 %include "dirops.inc"
 %include "exec.inc"
 %include "int21.inc"

@@ -123,6 +123,8 @@ disk_init:
         jc      .bad
         mov     byte [fat_dirty], 0
 
+        call    dpb_build
+
         clc
         jmp     .done
 .bad:
@@ -315,6 +317,74 @@ disk_flush_fat:
 .nothing:
         clc
         ret
+
+; ---------------------------------------------------------------------------
+; dpb_build - DPB (Drive Parameter Block) を組み立てる
+;
+; DOS が各ドライブについて持っている構造体。AH=32h でプログラムに直接
+; 渡され、List of Lists からも辿れる。当時のディスクツール
+; (CHKDSK、デフラグ、セクタエディタの類) はここからジオメトリを読む。
+; BPB を読み直すのではなく DPB を見るのが正しい作法とされていた。
+; ---------------------------------------------------------------------------
+dpb_build:
+        push    ax
+        push    cx
+        push    dx
+
+        mov     byte [dpb + DPB_DRIVE], 0       ; A:
+        mov     byte [dpb + DPB_UNIT], 0
+        mov     word [dpb + DPB_SECSIZE], SECTOR_SIZE
+
+        mov     ax, [sec_per_clus]
+        dec     ax
+        mov     [dpb + DPB_CLUSMASK], al        ; クラスタ内の最大セクタ番号
+
+        ; クラスタ→セクタの変換に使うシフト量 (sec_per_clus の log2)
+        mov     ax, [sec_per_clus]
+        xor     cl, cl
+.shift:
+        shr     ax, 1
+        cmp     ax, 1
+        jb      .shift_done
+        inc     cl
+        jmp     .shift
+.shift_done:
+        mov     [dpb + DPB_CLUSSHIFT], cl
+
+        mov     ax, [reserved_secs]
+        mov     [dpb + DPB_RESERVED], ax
+        mov     al, [num_fats]
+        mov     [dpb + DPB_NUMFATS], al
+        mov     ax, [root_entries]
+        mov     [dpb + DPB_ROOTENT], ax
+        mov     ax, [data_lba]
+        mov     [dpb + DPB_DATASEC], ax
+        mov     ax, [max_cluster]
+        dec     ax
+        mov     [dpb + DPB_MAXCLUS], ax         ; 最大クラスタ番号
+        mov     ax, [secs_per_fat]
+        mov     [dpb + DPB_SECPERFAT], ax
+        mov     ax, [root_lba]
+        mov     [dpb + DPB_DIRSEC], ax
+        mov     al, [media_desc]
+        mov     [dpb + DPB_MEDIA], al
+        mov     byte [dpb + DPB_ACCESS], 0      ; 0 = アクセス済み
+        mov     dword [dpb + DPB_NEXT], 0xFFFFFFFF      ; 次の DPB はない
+        mov     word [dpb + DPB_FREESRCH], 2
+        mov     word [dpb + DPB_FREECNT], 0xFFFF        ; 不明 (聞かれたら数える)
+
+        ; デバイスドライバのヘッダ (いまは NUL を指しておく)
+        mov     word [dpb + DPB_DRIVER], 0
+        mov     ax, cs
+        mov     [dpb + DPB_DRIVER + 2], ax
+
+        pop     dx
+        pop     cx
+        pop     ax
+        ret
+
+; --- DPB 本体 --------------------------------------------------------------
+dpb:            times DPB_SIZE db 0
 
 ; --- BPB から取り込む値 ----------------------------------------------------
 ; すべて word で持つ。掛け算・割り算にそのまま使えるようにするため。
