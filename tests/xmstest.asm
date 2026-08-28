@@ -39,6 +39,7 @@ start:
         call    t_move
         call    t_info
         call    t_free
+        call    t_int2f
 
         call    newline
         mov     si, msg_result
@@ -409,6 +410,41 @@ a20_check:
         ret
 
 ; ============================================================================
+; 9. INT 2Fh は知らない機能でレジスタを変えないこと
+;
+; INT 2Fh は「導入確認」の待ち合わせ場所で、呼ぶ側が AL=0 を入れて
+; 呼び、常駐したものがあれば AL=FFh を返す、という取り決めになっている。
+; DOS が知らない機能で勝手に AL を書くと、この取り決めが壊れるだけでなく、
+; AL に引数を載せて呼ぶ機能 (DPMI の 1687h など) では返り値そのものが
+; 化ける。DPMI ホストの有無を見に来たプログラムが「いる」と誤解する、
+; といった形で表に出る。
+; ============================================================================
+t_int2f:
+        mov     si, n_int2f
+        call    begin
+
+        ; DPMI の導入確認。ホストが居なければ AX は 1687h のまま返るのが
+        ; 正しい。0 が返ると「DPMI ホストが居る」の意味になってしまう。
+        mov     byte [step], 1
+        mov     ax, 0x1687
+        xor     bx, bx
+        xor     cx, cx
+        xor     dx, dx
+        xor     si, si
+        int     0x2F
+        cmp     ax, 0x1687
+        jne     failx
+
+        ; 誰も居ない機能番号でも同じ。AL を書き換えられていないか見る。
+        mov     byte [step], 2
+        mov     ax, 0xB800
+        int     0x2F
+        cmp     ax, 0xB800
+        jne     failx
+
+        jmp     pass
+
+; ============================================================================
 ; 出力まわり
 ; ============================================================================
 begin:
@@ -537,6 +573,7 @@ n_alloc:     db 'XMS 08h/09h  allocate 64K of extended memory', 0
 n_move:      db 'XMS 0Bh  copy up past 1MB and back, byte for byte', 0
 n_info:      db 'XMS 0Ch/0Dh/0Eh/0Fh  lock, query and shrink', 0
 n_free:      db 'XMS 0Ah  the handle is gone after freeing it', 0
+n_int2f:     db 'INT 2Fh  an unknown function leaves the registers alone', 0
 
 ; --- 変数 ------------------------------------------------------------------
 test_name:   dw 0
