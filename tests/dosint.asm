@@ -87,6 +87,7 @@ start:
         call    t_buffers
         call    t_country
         call    t_sda
+        call    t_dbcs
 
         call    newline
         mov     si, msg_result
@@ -730,6 +731,79 @@ t_sda:
         pop     es
         jmp     fail
 
+; ---------------------------------------------------------------------------
+; AH=63h - 2 バイト文字 (DBCS) の先頭バイト表
+;
+; 表は「先頭バイトになりうる範囲」の組を並べ、0 の組で終わる。2 バイト文字を
+; 扱わない実装でも、空の表 (0 の組だけ) を返さなければならない。
+;
+; ここで見るのは「DS:SI が本当に置き換わっているか」。AL=0 で成功だけ返して
+; DS:SI をそのままにすると、呼んだ側は自分の DS:SI が指す先を表だと思って
+; 読み始める。そこにたまたま 0 が無ければ、どこまでも範囲の組を拾い続けて
+; 戻ってこない。Mpxplay (DOS/32A) が起動直後に無言で止まっていたのがこれ。
+; ---------------------------------------------------------------------------
+t_dbcs:
+        mov     si, n_dbcs
+        call    begin
+
+        ; わざと「表ではない場所」を DS:SI に入れてから呼ぶ。
+        ; 置き換えられなければ、この番地がそのまま返ってくる。
+        push    ds
+        pop     es
+        mov     word [dbcs_decoy], 0x0102       ; 0 で終わらない中身
+        mov     word [dbcs_decoy + 2], 0x0304
+
+        push    ds
+        mov     si, dbcs_decoy
+        mov     ax, 0x6300
+        int     0x21
+        mov     bx, ds
+        pop     ds
+        jc      fail
+        test    al, al
+        jnz     fail
+        mov     [dbcs_seg], bx
+        mov     [dbcs_off], si
+
+        ; 返ってきたのが、こちらが渡した番地そのままではないこと
+        mov     ax, ds
+        cmp     ax, [dbcs_seg]
+        jne     .moved
+        cmp     si, dbcs_decoy
+        je      fail                    ; DS:SI が置き換えられていない
+.moved:
+        ; 表の終わりが読めること (空の表なら先頭がいきなり 0 の組)
+        push    es
+        mov     es, [dbcs_seg]
+        mov     di, [dbcs_off]
+        mov     cx, 32                  ; 32 組以内に終端があるはず
+.scan:
+        cmp     word [es:di], 0
+        je      .found_end
+        add     di, 2
+        loop    .scan
+        pop     es
+        jmp     fail
+.found_end:
+        pop     es
+
+        ; AL=01h / AL=02h の旗が往復すること
+        mov     ax, 0x6301
+        mov     dl, 1
+        int     0x21
+        jc      fail
+        mov     ax, 0x6302
+        mov     dl, 0
+        int     0x21
+        jc      fail
+        cmp     dl, 1
+        jne     fail
+
+        mov     ax, 0x6301              ; 元に戻す
+        mov     dl, 0
+        int     0x21
+        jmp     pass
+
 begin:
         push    si
         mov     si, str_indent
@@ -845,6 +919,10 @@ n_dev:       db 'LoL+22  device chain NUL-CON-AUX-PRN-CLOCK$-block', 0
 n_sft:       db 'LoL+04  SFT chain shows an open file by name', 0
 n_cds:       db 'LoL+16  CDS array follows CHDIR', 0
 n_buf:       db 'LoL+12  disk buffer chain is linked', 0
+n_dbcs:      db 'AH=63h  the DBCS table pointer really is replaced', 0
+dbcs_seg:    dw 0
+dbcs_off:    dw 0
+dbcs_decoy:  times 8 db 0xFF
 n_sda:       db 'AH=5D06h/5D0Bh  the swappable data area is the real one', 0
 indos_seg:   dw 0
 indos_off:   dw 0

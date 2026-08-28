@@ -1432,6 +1432,49 @@ f_5F:
         jmp     int21_err
 
 ; ===========================================================================
+; 63h - 2 バイト文字 (DBCS) の先頭バイト表
+;   AL=00h  DS:SI = 表の位置, AL = 0
+;   AL=01h  DL の値で「途中経過を表示する」旗を立てる
+;   AL=02h  DL にその旗を返す
+;
+; 表は「先頭バイトになりうる範囲」の組を並べ、0 の組で終わる。
+; 日本語や中国語の DOS はここに 81-9F, E0-FC のような範囲を並べていた。
+; 2 バイト文字を扱わない実装では、空の表 (0 の組だけ) を返す。
+;
+; 大事なのは「空でも表を返す」こと。AL=0 で成功だけ返して DS:SI を
+; 置き換えないと、呼んだ側は自分の DS:SI が指す先を表だと思って読み始める。
+; そこにたまたま 0 が無ければ、どこまでも範囲の組を拾い続けて戻ってこない。
+; Mpxplay (DOS/32A) が起動直後に無言で止まるのはこれだった。
+; ===========================================================================
+f_63:
+        mov     al, [u_ax]
+        cmp     al, 0x01
+        je      .set_interim
+        cmp     al, 0x02
+        je      .get_interim
+        test    al, al
+        jnz     .bad
+
+        mov     ax, cs
+        mov     [u_ds], ax
+        mov     word [u_si], dbcs_tab
+        mov     byte [u_ax], 0
+        jmp     int21_ok
+.set_interim:
+        mov     al, [u_dx]
+        mov     [interim_flag], al
+        mov     byte [u_ax], 0
+        jmp     int21_ok
+.get_interim:
+        mov     al, [interim_flag]
+        mov     [u_dx], al
+        mov     byte [u_ax], 0
+        jmp     int21_ok
+.bad:
+        mov     ax, ERR_FUNC
+        jmp     int21_err
+
+; ===========================================================================
 ; 69h - ディスクのシリアル番号とボリュームラベル
 ;   AL=0 取得 / AL=1 設定、DS:DX = 25 バイトのバッファ
 ; ===========================================================================
@@ -2006,7 +2049,7 @@ int21_table:
         dw f_48, f_49, f_4A, f_4B, f_4C, f_4D, f_4E, f_4F       ; 48-4F
         dw f_50, f_51, f_52, f_53, f_54, f_55, f_56, f_57       ; 50-57
         dw f_58, f_59, f_5A, f_5B, f_5C, f_5D, f_5E, f_5F       ; 58-5F
-        dw f_60, f_bad, f_62, f_nop_ok, f_nop_ok, f_65, f_66, f_nop_ok ; 60-67
+        dw f_60, f_bad, f_62, f_63, f_nop_ok, f_65, f_66, f_nop_ok ; 60-67
         dw f_68, f_69, f_6A, f_nop_ok, f_6C, f_bad, f_bad, f_bad ; 68-6F
         dw f_bad, f_71, f_bad, f_bad, f_bad, f_bad, f_bad, f_bad ; 70-77
         times (256 - 0x78) dw f_bad
@@ -2407,6 +2450,7 @@ kernel_seg_ptr: dw      0                       ; セグメントは起動時に
 ; --- 変数 ------------------------------------------------------------------
 verify_flag:    db 0
 switch_char:    db '/'
+interim_flag:   db 0            ; AH=63h の「途中経過を表示する」旗
 temp_counter:   dw 0
 code_page:      dw 932
 vol_label:      db 'MYDOS      '        ; 11 バイト
