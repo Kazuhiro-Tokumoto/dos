@@ -31,6 +31,7 @@ FDBIMG  := $(BUILD)/blank.img
 
 STAGE1  := $(BUILD)/stage1.bin
 STAGE2  := $(BUILD)/stage2.bin
+MBR     := $(BUILD)/mbr.bin
 KERNEL  := $(BUILD)/io.sys
 KERNEL_DBG := $(BUILD)/io-debug.sys
 SHELL_COM := $(BUILD)/command.com
@@ -43,7 +44,7 @@ PROGS := $(BUILD)/hello.com $(BUILD)/hello.exe $(BUILD)/dostest.com \
          $(BUILD)/lfntest.com $(BUILD)/pipetest.com \
          $(BUILD)/emstest.com \
          $(BUILD)/ovl.ovl $(BUILD)/mydev.sys $(BUILD)/ramdisk.sys \
-         $(BUILD)/emm386.sys $(BUILD)/format.com $(BUILD)/sys.com
+         $(BUILD)/emm386.sys $(BUILD)/format.com $(BUILD)/sys.com $(BUILD)/fdisk.com
 
 KDEPS := kernel/io.asm $(wildcard $(INCDIR)/*.inc)
 
@@ -59,6 +60,10 @@ $(STAGE1): boot/stage1.asm | $(BUILD)
 	$(NASM) $(NASMFLAGS) $< -o $@
 
 $(STAGE2): boot/stage2.asm | $(BUILD)
+	$(NASM) $(NASMFLAGS) $< -o $@
+
+# ハードディスクの先頭セクタ。FDISK.COM が中に抱えて配る。
+$(MBR): boot/mbr.asm | $(BUILD)
 	$(NASM) $(NASMFLAGS) $< -o $@
 
 # --- カーネル ---------------------------------------------------------------
@@ -87,6 +92,10 @@ $(BUILD)/%.sys: tests/%.asm | $(BUILD)
 
 # 外部コマンド。DOS 本体ではなく、ディスクに置かれる普通のプログラム。
 $(BUILD)/%.com: cmds/%.asm | $(BUILD)
+	$(NASM) $(NASMFLAGS) $< -o $@
+
+# FDISK は MBR のバイナリを抱え込むので、先に作っておく必要がある。
+$(BUILD)/fdisk.com: cmds/fdisk.asm $(MBR) | $(BUILD)
 	$(NASM) $(NASMFLAGS) $< -o $@
 
 # 実用のドライバ。EMM386.SYS は EMS (INT 67h) を提供する。
@@ -127,6 +136,7 @@ define make_image
 	$(MCOPY) -i $(1) -o $(BUILD)/emm386.sys ::EMM386.SYS
 	$(MCOPY) -i $(1) -o $(BUILD)/format.com ::FORMAT.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/sys.com ::SYS.COM
+	$(MCOPY) -i $(1) -o $(BUILD)/fdisk.com ::FDISK.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/emstest.com ::EMSTEST.COM
 	$(MCOPY) -i $(1) -o tests/config.sys ::CONFIG.SYS
 	$(MCOPY) -i $(1) -o $(BUILD)/ovl.ovl ::OVL.OVL
@@ -178,8 +188,8 @@ test: $(IMG_DBG) $(BUILD)/envtest.com
 	$(call hd_populate,$(HDIMG))
 	rm -f $(FDBIMG)
 	mformat -C -f 1440 -v OLDDISK -i $(FDBIMG) ::
-	$(PYTHON) tools/runtest.py $(IMG_DBG) --hd $(HDIMG) \
-	    --fdb $(FDBIMG) --verify-boot $(FDBIMG)
+	$(PYTHON) tools/runtest.py $(IMG_DBG) --hd $(HDIMG) --fdb $(FDBIMG) \
+	    --verify-boot-fd $(FDBIMG) --verify-boot-hd $(HDIMG)
 
 # 参照実装 (js/) の回帰テスト。node があるときだけ動く。
 js-test:

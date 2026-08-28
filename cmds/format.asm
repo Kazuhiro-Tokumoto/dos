@@ -217,7 +217,8 @@ upcase:
 get_geometry:
         mov     al, [dos_drive]
         cmp     al, 2
-        jae     .bad                    ; C: 以降はフロッピーではない
+        jae     hd_geometry             ; C: 以降はハードディスクの区画
+        mov     byte [is_floppy], 1
         mov     [bios_drive], al
 
         push    es
@@ -260,9 +261,77 @@ get_geometry:
         mov     ax, [g_cyls]
         mul     word [g_heads]
         mul     word [g_spt]
-        mov     [g_total], ax
+        movzx   eax, ax
+        mov     [g_total], eax
+        mov     dword [g_hidden], 0
         clc
         ret
+.bad:
+        stc
+        ret
+
+; ---------------------------------------------------------------------------
+; hd_geometry - ハードディスクの区画は、いま入っている BPB から諸元を取る
+;
+; フロッピーと違って BIOS に「この区画はどこからどこまでか」を聞く方法が
+; ない。区画の情報はパーティションテーブルにあり、そこは DOS のドライブ文字
+; では指せない場所にある。そこで、すでに入っている BPB をそのまま信じる。
+;
+; つまりここでできるのは「一度フォーマットされた区画を作り直す」ことだけで、
+; 何も書かれていない区画を初期化することはできない。DOS がその区画を
+; ドライブとして認識していないと、そもそも書き込みの窓口 (INT 26h) が
+; 使えないので、これは避けようがない。区画を新しく切ったときは、
+; FDISK が最低限の BPB を置いてから FORMAT を掛ける、という順になる。
+; ---------------------------------------------------------------------------
+hd_geometry:
+        mov     byte [is_floppy], 0
+
+        push    ds
+        pop     es
+        mov     al, [dos_drive]
+        mov     cx, 1
+        xor     dx, dx
+        mov     bx, secbuf
+        int     0x25
+        jc      .err
+        add     sp, 2
+
+        cmp     word [secbuf + 0x0B], SECTOR_SIZE
+        jne     .bad
+
+        mov     ax, [secbuf + 0x18]     ; セクタ/トラック
+        test    ax, ax
+        jz      .bad
+        mov     [g_spt], ax
+        mov     ax, [secbuf + 0x1A]     ; ヘッド数
+        test    ax, ax
+        jz      .bad
+        mov     [g_heads], ax
+        mov     eax, [secbuf + 0x1C]    ; 隠しセクタ (区画の開始位置)
+        mov     [g_hidden], eax
+
+        movzx   eax, word [secbuf + 0x13]
+        test    eax, eax
+        jnz     .have_total
+        mov     eax, [secbuf + 0x20]    ; 16bit に収まらない大きさ
+.have_total:
+        test    eax, eax
+        jz      .bad
+        mov     [g_total], eax
+
+        ; いま入っている割り付けをそのまま引き継ぐ。変えるのは予約セクタだけ。
+        movzx   ax, byte [secbuf + 0x0D]
+        mov     [b_secperclus], ax
+        mov     ax, [secbuf + 0x11]
+        mov     [b_rootent], ax
+        mov     ax, [secbuf + 0x16]
+        mov     [b_secperfat], ax
+        mov     al, [secbuf + 0x15]
+        mov     [b_media], al
+        clc
+        ret
+.err:
+        add     sp, 2
 .bad:
         stc
         ret
@@ -271,11 +340,28 @@ get_geometry:
 ; 総セクタ数から FAT12 の割り付けを決める
 ; ============================================================================
 pick_layout:
-        mov     ax, [g_total]
-        cmp     ax, 2880
+        cmp     byte [is_floppy], 0
+        je      .hd
+
+        mov     eax, [g_total]
+        cmp     eax, 2880
         je      .fd144
-        cmp     ax, 1440
+        cmp     eax, 1440
         je      .fd720
+        stc
+        ret
+
+        ; ハードディスクの区画は hd_geometry がもう決めている。
+        ; 予約セクタだけを 18 にして、Stage2 の置き場所を作る。
+.hd:
+        cmp     word [b_secperclus], 0
+        je      .no
+        cmp     word [b_secperfat], 0
+        je      .no
+        mov     word [b_reserved], MYDOS_RESERVED
+        clc
+        ret
+.no:
         stc
         ret
 
@@ -379,8 +465,18 @@ write_boot:
         mov     byte [di + 0x10], 2             ; FAT は 2 本
         mov     ax, [b_rootent]
         mov     [di + 0x11], ax
-        mov     ax, [g_total]
+        ; 総セクタ数は 65535 までなら 16bit の欄、それを超えるときは
+        ; 16bit 側を 0 にして 32bit の欄に入れる、という決まり。
+        mov     eax, [g_total]
+        cmp     eax, 0x10000
+        jae     .big
         mov     [di + 0x13], ax
+        mov     dword [di + 0x20], 0
+        jmp     .total_done
+.big:
+        mov     word [di + 0x13], 0
+        mov     [di + 0x20], eax
+.total_done:
         mov     al, [b_media]
         mov     [di + 0x15], al
         mov     ax, [b_secperfat]
@@ -389,8 +485,8 @@ write_boot:
         mov     [di + 0x18], ax
         mov     ax, [g_heads]
         mov     [di + 0x1A], ax
-        mov     dword [di + 0x1C], 0            ; 隠しセクタ
-        mov     dword [di + 0x20], 0            ; 32bit の総セクタ数
+        mov     eax, [g_hidden]
+        mov     [di + 0x1C], eax                ; 区画の開始位置
 
         ; 拡張 BPB
         mov     al, [bios_drive]
@@ -596,6 +692,20 @@ write_sectors:
         mov     [.count], cx
         push    ds
         pop     es
+
+        cmp     byte [is_floppy], 0
+        jne     .loop
+
+        ; ハードディスクの区画は DOS の絶対書き込みに任せる。区画の先頭が
+        ; どこかを知っているのは DOS のほうなので、BIOS を直接呼ぶと
+        ; 区画の外に書いてしまう。
+        mov     al, [dos_drive]
+        mov     cx, [.count]
+        mov     dx, word [.lba]
+        int     0x26
+        jc      .fail_dos
+        add     sp, 2
+        jmp     .done
 .loop:
         cmp     word [.count], 0
         je      .done
@@ -642,6 +752,8 @@ write_sectors:
 .done:
         clc
         jmp     .out
+.fail_dos:
+        add     sp, 2
 .fail:
         stc
 .out:
@@ -731,20 +843,20 @@ get_stamp:
 ; ============================================================================
 report_size:
         ; 使える容量 = (総セクタ - 予約 - FAT 2 本 - ルート) * 512
-        mov     ax, [g_total]
-        sub     ax, [b_reserved]
-        mov     bx, [b_secperfat]
-        shl     bx, 1
-        sub     ax, bx
-        mov     bx, [b_rootent]
-        add     bx, 15
-        mov     cl, 4
-        shr     bx, cl
-        sub     ax, bx
+        mov     eax, [g_total]
+        movzx   ebx, word [b_reserved]
+        sub     eax, ebx
+        movzx   ebx, word [b_secperfat]
+        shl     ebx, 1
+        sub     eax, ebx
+        movzx   ebx, word [b_rootent]
+        add     ebx, 15
+        shr     ebx, 4
+        sub     eax, ebx
 
         ; セクタ数 → KB (1 セクタ 512 バイト = 0.5KB)
-        shr     ax, 1
-        call    put_dec
+        shr     eax, 1
+        call    put_dec32
         mov     dx, msg_kb
         call    puts
         ret
@@ -792,18 +904,20 @@ puts:
         ret
 
 put_dec:
-        push    ax
-        push    bx
-        push    cx
-        push    dx
-        mov     bx, 10
+        movzx   eax, ax
+put_dec32:
+        push    eax
+        push    ebx
+        push    ecx
+        push    edx
+        mov     ebx, 10
         xor     cx, cx
 .split:
-        xor     dx, dx
-        div     bx
+        xor     edx, edx
+        div     ebx
         push    dx
         inc     cx
-        test    ax, ax
+        test    eax, eax
         jnz     .split
 .emit:
         pop     dx
@@ -811,10 +925,10 @@ put_dec:
         mov     ah, 0x02
         int     0x21
         loop    .emit
-        pop     dx
-        pop     cx
-        pop     bx
-        pop     ax
+        pop     edx
+        pop     ecx
+        pop     ebx
+        pop     eax
         ret
 
 ; ============================================================================
@@ -853,9 +967,9 @@ nonsys_end:
 msg_usage:    db 'FORMAT d: [/S] [/V:label]', 13, 10
               db '  /S       make the disk bootable afterwards (runs SYS)', 13, 10
               db '  /V:name  set the volume label', 13, 10, '$'
-msg_no_drive: db 'FORMAT: that drive is not a floppy drive', 13, 10
-              db 'Hard disks are partitioned with FDISK, not formatted here.', 13, 10, '$'
-msg_bad_media:db 'FORMAT: unsupported disk size (1.44MB and 720KB only)', 13, 10, '$'
+msg_no_drive: db 'FORMAT: cannot work out the layout of that drive', 13, 10
+              db '  A hard disk partition must already carry a BPB (FDISK first).', 13, 10, '$'
+msg_bad_media:db 'FORMAT: unsupported floppy size (1.44MB and 720KB only)', 13, 10, '$'
 msg_wr_err:   db 13, 10, 'FORMAT: write failed', 13, 10, '$'
 msg_aborted:  db 'FORMAT cancelled', 13, 10, '$'
 msg_warn1:    db 'WARNING: everything on drive '
@@ -887,12 +1001,14 @@ epb_fcb2:     dd 0
 dos_drive:    db 0
 bios_drive:   db 0
 opt_sys:      db 0
+is_floppy:    db 1
 answer:       db 0
 
 g_spt:        dw 0
 g_heads:      dw 0
 g_cyls:       dw 0
-g_total:      dw 0
+g_total:      dd 0
+g_hidden:     dd 0
 
 b_secperclus: dw 0
 b_reserved:   dw 0

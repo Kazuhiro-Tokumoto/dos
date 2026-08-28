@@ -97,6 +97,29 @@ start:
         ; これを保存して以後ずっと使う (決め打ちしない)。
         mov     [boot_drive], dl
 
+        ; Stage2 の先頭 = このボリュームの先頭 + 1 セクタ。
+        ; フロッピーは隠しセクタが 0 なので LBA 1 だが、ハードディスクの
+        ; パーティションでは MBR が示した開始位置がここに入っている。
+        mov     eax, [bpb_hidden_secs]
+        inc     eax
+        mov     [stage2_lba], eax
+
+        ; INT 13h の拡張読み込みが使えるか調べる。
+        ; ハードディスクのパーティションはトラック境界と揃っていないので、
+        ; 17 セクタを CHS で一度に読むと BIOS に断られることがある。
+        ; 拡張読み込みなら LBA をそのまま渡せるのでその心配がない。
+        mov     ah, 0x41
+        mov     bx, 0x55AA
+        mov     dl, [boot_drive]
+        int     0x13
+        jc      .no_lba
+        cmp     bx, 0xAA55
+        jne     .no_lba
+        test    cl, 1                   ; bit0 = 拡張読み書きが使える
+        jz      .no_lba
+        mov     byte [use_lba], 1
+.no_lba:
+
         ; Stage2 が既に 0x7E00 に載っているなら読み込みは要らない。
         ; CD (El Torito のノーエミュレーション起動) では BIOS が
         ; stage1 と stage2 をまとめて 0x7C00 に読み込んでくれるため。
@@ -114,18 +137,45 @@ start:
         mov     dl, [boot_drive]
         int     0x13
 
-        ; --- セクタ読み込み (INT 13h AH=02h, CHS) ---
         xor     ax, ax
-        mov     es, ax              ; ES:BX = 0000:7E00
+        mov     es, ax              ; 転送先は 0000:7E00
+
+        cmp     byte [use_lba], 0
+        je      .chs
+
+        ; --- 拡張読み込み (INT 13h AH=42h) ---
+        mov     eax, [stage2_lba]
+        mov     [dap_lba], eax
+        mov     si, dap
+        mov     dl, [boot_drive]
+        mov     ah, 0x42
+        int     0x13
+        jmp     .after
+
+        ; --- CHS 読み込み (INT 13h AH=02h) ---
+.chs:
+        mov     eax, [stage2_lba]
+        xor     edx, edx
+        movzx   ecx, word [bpb_secs_per_track]
+        div     ecx                 ; EAX = トラック, EDX = セクタ-1
+        inc     dl
+        mov     [chs_sector], dl
+        xor     edx, edx
+        movzx   ecx, word [bpb_num_heads]
+        div     ecx                 ; EAX = シリンダ, EDX = ヘッド
+        mov     [chs_head], dl
+        mov     ch, al
+        mov     cl, ah
+        shl     cl, 6               ; シリンダの上位 2bit
+        or      cl, [chs_sector]
+        mov     dh, [chs_head]
+        mov     dl, [boot_drive]
         mov     bx, STAGE2_OFF
         mov     ah, 0x02            ; 機能: セクタ読み込み
         mov     al, STAGE2_SECTORS  ; 読み込むセクタ数
-        mov     ch, 0               ; シリンダ 0
-        mov     cl, 2               ; 開始セクタ番号 2 (1 は Stage1 自身)
-        mov     dh, 0               ; ヘッド 0
-        mov     dl, [boot_drive]
         int     0x13
 
+.after:
         pop     cx
         jnc     .read_ok            ; CF=0 なら成功
 
@@ -156,6 +206,18 @@ halt:
 ; ---------------------------------------------------------------------------
 msg_err:        db 'STAGE1: DISK ERROR', 0
 boot_drive:     db 0
+use_lba:        db 0
+chs_head:       db 0
+chs_sector:     db 0
+                align 4
+stage2_lba:     dd 0
+
+; ディスクアドレスパケット (INT 13h AH=42h 用)
+dap:            db 0x10, 0          ; 大きさ / 予約
+                dw STAGE2_SECTORS   ; セクタ数
+                dw STAGE2_OFF       ; 転送先オフセット
+                dw 0                ; 転送先セグメント
+dap_lba:        dq 0                ; 開始 LBA
 
 ; --- 510 バイトまで 0 埋めし、末尾にブートシグネチャ ---
         times 510-($-$$) db 0

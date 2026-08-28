@@ -65,21 +65,16 @@ stage2_start:
         call    load_bpb
         jc      .bad_bpb
 
-        ; ------------------------------------------------------------
-        ; 2. FAT1 を丸ごと読む
-        ; ------------------------------------------------------------
-        mov     ax, [reserved_secs]     ; FAT1 の LBA
-        mov     cx, [secs_per_fat]
-        mov     bx, FAT_BUF
-        push    es
-        xor     dx, dx
-        mov     es, dx
-        call    read_sectors
-        pop     es
-        jc      .disk_err
+        ; 拡張読み込みが使えるかどうかを一度だけ調べる
+        call    check_lba
+
+        ; FAT は丸ごと読まない。必要なところだけ、そのつど読む。
+        ; FAT12 のフロッピーなら 4.5KB で済むが、FAT16 の 40MB
+        ; パーティションでは 40KB になり、置き場所がカーネルの
+        ; ロード先 (0x10000) とぶつかる。
 
         ; ------------------------------------------------------------
-        ; 3. ルートディレクトリから IO.SYS を探す
+        ; 2. ルートディレクトリから IO.SYS を探す
         ; ------------------------------------------------------------
         mov     si, kernel_name
         call    find_in_root
@@ -89,7 +84,7 @@ stage2_start:
         mov     [kernel_clus], ax
 
         ; ------------------------------------------------------------
-        ; 4. クラスタ連鎖を辿ってロード
+        ; 3. クラスタ連鎖を辿ってロード
         ; ------------------------------------------------------------
         mov     si, msg_loading
         call    puts
@@ -103,7 +98,7 @@ stage2_start:
         call    puts
 
         ; ------------------------------------------------------------
-        ; 5. カーネルへ
+        ; 4. カーネルへ
         ;
         ; 渡すのは DL (ブートドライブ番号) だけ。BPB はカーネルが自分で
         ; LBA 0 を読み直して取る。0x7C00 の内容が生きているかどうかに
@@ -172,11 +167,22 @@ load_bpb:
         jz      .bad
         mov     [num_heads], ax
 
+        ; 隠しセクタ = このボリュームがディスクの何セクタ目から始まるか。
+        ; フロッピーは 0、ハードディスクのパーティションは MBR が示す
+        ; 開始 LBA が入っている。以降 LBA はすべてこれを足して使う。
+        mov     eax, [BOOTSEC + 0x1C]
+        mov     [part_lba], eax
+
         ; ルートディレクトリの LBA = 予約 + FAT の総セクタ数
         mov     ax, [num_fats]
-        mul     word [secs_per_fat]
-        add     ax, [reserved_secs]
-        mov     [root_lba], ax
+        mul     word [secs_per_fat]     ; DX:AX (FAT16 の大きな FAT でも入る)
+        movzx   ecx, dx
+        shl     ecx, 16
+        movzx   eax, ax
+        or      eax, ecx
+        movzx   ecx, word [reserved_secs]
+        add     eax, ecx
+        mov     [root_lba], eax
 
         ; ルートディレクトリのセクタ数 = (エントリ数 * 32 + 511) / 512
         mov     ax, [root_entries]
@@ -185,8 +191,36 @@ load_bpb:
         mov     [root_secs], ax
 
         ; データ領域の LBA
-        add     ax, [root_lba]
-        mov     [data_lba], ax
+        movzx   eax, ax
+        add     eax, [root_lba]
+        mov     [data_lba], eax
+
+        ; --- FAT12 か FAT16 か ---
+        ;
+        ; 決め手はクラスタの数だけ。ブートセクタの "FAT12   " という文字列は
+        ; ただの飾りで、これを見て決めてはいけないことになっている
+        ; (書き換えずにサイズだけ変えたディスクが実在するため)。
+        ;
+        ;   クラスタ数 = (総セクタ - データ領域の開始) / クラスタあたりセクタ
+        ;   4085 未満なら FAT12、それ以上なら FAT16
+        movzx   eax, word [BOOTSEC + 0x13]      ; 16bit の総セクタ数
+        test    eax, eax
+        jnz     .have_total
+        mov     eax, [BOOTSEC + 0x20]           ; 0 なら 32bit のほうを見る
+.have_total:
+        sub     eax, [data_lba]
+        xor     edx, edx
+        movzx   ecx, word [sec_per_clus]
+        div     ecx                             ; EAX = クラスタ数
+        cmp     eax, 4085
+        jb      .is12
+        mov     byte [is_fat16], 1
+        mov     word [fat_eof], 0xFFF8
+        jmp     .fat_done
+.is12:
+        mov     byte [is_fat16], 0
+        mov     word [fat_eof], 0x0FF8
+.fat_done:
 
         clc
         jmp     .done
@@ -199,7 +233,8 @@ load_bpb:
 
 ; ============================================================================
 ; read_sectors - LBA から連続したセクタを読む
-;   入力: AX = 開始 LBA, CX = セクタ数, ES:BX = 転送先
+;   入力: EAX = 開始 LBA (ボリュームの先頭からの相対), CX = セクタ数,
+;         ES:BX = 転送先
 ;   出力: CF=1 なら失敗。ES:BX を含め全レジスタは保存される
 ;
 ; 1 回の INT 13h で 1 セクタずつ読む。まとめて読むほうが速いが、
@@ -208,15 +243,15 @@ load_bpb:
 ; ブート時に数十セクタ読むだけなので、確実さを取る。
 ; ============================================================================
 read_sectors:
-        pusha
+        pushad
         push    es
-        mov     [.lba], ax
+        mov     [.lba], eax
         mov     [.count], cx
 .loop:
         cmp     word [.count], 0
         je      .done
 
-        mov     ax, [.lba]
+        mov     eax, [.lba]
         call    read_one
         jc      .fail
 
@@ -227,72 +262,158 @@ read_sectors:
         add     ax, 0x1000
         mov     es, ax
 .no_wrap:
-        inc     word [.lba]
+        inc     dword [.lba]
         dec     word [.count]
         jmp     .loop
 .done:
         pop     es
-        popa
+        popad
         clc
         ret
 .fail:
         pop     es
-        popa
+        popad
         stc
         ret
-.lba:   dw 0
+.lba:   dd 0
 .count: dw 0
 
 ; ============================================================================
-; read_one - 1 セクタを CHS で読む (5 回までリトライ)
-;   入力: AX = LBA, ES:BX = 転送先
+; read_one - 1 セクタ読む (5 回までリトライ)
+;   入力: EAX = LBA (ボリュームの先頭からの相対), ES:BX = 転送先
 ;   出力: CF=1 なら失敗
 ;
-; LBA から CHS への変換:
-;   sector   = LBA mod secs_per_track + 1   (セクタ番号は 1 起算)
-;   head     = (LBA / secs_per_track) mod heads
-;   cylinder = (LBA / secs_per_track) / heads
+; まず隠しセクタ (このボリュームがディスクの何セクタ目から始まるか) を足して
+; 絶対 LBA にする。フロッピーは 0 なのでそのまま、ハードディスクの
+; パーティションでは MBR が示した開始位置が足される。
+;
+; 読み方は 2 通り。
+;
+;   ・INT 13h AH=42h (拡張読み込み)
+;     アドレスを 64bit の LBA でそのまま渡せる。使えるかどうかは AH=41h で
+;     聞く。1994 年以降の BIOS はほぼ持っている。
+;   ・INT 13h AH=02h (CHS)
+;     LBA を シリンダ/ヘッド/セクタ に直して渡す。当時の BIOS はこれしか
+;     持っていなかった。シリンダが 1024 を超えると届かない。
+;
+;       sector   = LBA mod secs_per_track + 1   (セクタ番号は 1 起算)
+;       head     = (LBA / secs_per_track) mod heads
+;       cylinder = (LBA / secs_per_track) / heads
+;
+; フロッピーでは拡張読み込みを持っていない BIOS が多いので、必ず両方要る。
 ; ============================================================================
 read_one:
-        push    ax
-        push    bx
-        push    cx
-        push    dx
-        push    di
+        pushad
+        push    es
 
-        xor     dx, dx
-        div     word [secs_per_track]   ; AX = LBA/spt, DX = LBA mod spt
-        mov     cl, dl
-        inc     cl                      ; CL = セクタ番号 (1 起算)
-        xor     dx, dx
-        div     word [num_heads]        ; AX = シリンダ, DX = ヘッド
-        mov     ch, al                  ; CH = シリンダ下位 8bit
-        mov     dh, dl                  ; DH = ヘッド
-        mov     dl, [boot_drive]
+        add     eax, [part_lba]         ; 絶対 LBA にする
+        mov     [.lba], eax
 
         mov     di, 5                   ; リトライ回数
 .retry:
+        cmp     byte [use_lba], 0
+        je      .chs
+
+        ; --- 拡張読み込み (AH=42h) ---
+        ; ディスクアドレスパケットを組み立てて渡す
+        mov     word [.dap_size], 0x0010
+        mov     word [.dap_count], 1
+        mov     [.dap_off], bx
+        mov     [.dap_seg], es
+        mov     eax, [.lba]
+        mov     [.dap_lba], eax
+        mov     dword [.dap_lba + 4], 0
+        push    ds
+        pop     es
+        mov     si, .dap_size
+        mov     dl, [boot_drive]
+        mov     ah, 0x42
+        int     0x13
+        pop     es
+        push    es
+        jnc     .ok
+        jmp     .failed
+
+        ; --- CHS (AH=02h) ---
+.chs:
+        mov     eax, [.lba]
+        xor     edx, edx
+        movzx   ecx, word [secs_per_track]
+        div     ecx                     ; EAX = トラック, EDX = セクタ-1
+        inc     dl
+        mov     [.sector], dl
+        xor     edx, edx
+        movzx   ecx, word [num_heads]
+        div     ecx                     ; EAX = シリンダ, EDX = ヘッド
+        cmp     eax, 1023
+        ja      .failed                 ; CHS では届かない位置
+        mov     [.cyl], ax
+        mov     [.head], dl
+
+        mov     ax, [.cyl]
+        mov     ch, al
+        mov     cl, ah
+        shl     cl, 6                   ; シリンダの上位 2bit
+        or      cl, [.sector]
+        mov     dh, [.head]
+        mov     dl, [boot_drive]
         mov     ax, 0x0201              ; AH=02h 読み込み, AL=1 セクタ
         int     0x13
         jnc     .ok
 
+.failed:
         ; 失敗したらディスクリセットを挟んでやり直す。
         ; 実機のフロッピーはモータの回転待ちで初回が失敗することがある。
-        push    ax
         xor     ax, ax
         mov     dl, [boot_drive]
         int     0x13
-        pop     ax
-        ; DL がリセットで壊れている可能性があるので入れ直す
-        mov     dl, [boot_drive]
         dec     di
         jnz     .retry
+        pop     es
+        popad
         stc
-        jmp     .out
+        ret
 .ok:
+        pop     es
+        popad
         clc
+        ret
+
+.lba:       dd 0
+.cyl:       dw 0
+.head:      db 0
+.sector:    db 0
+            align 4
+; ディスクアドレスパケット (INT 13h AH=42h 用)
+.dap_size:  dw 0x0010
+.dap_count: dw 0
+.dap_off:   dw 0
+.dap_seg:   dw 0
+.dap_lba:   dq 0
+
+; ============================================================================
+; check_lba - INT 13h の拡張読み込みが使えるか調べる
+;
+; AH=41h に BX=55AAh を入れて呼び、BX が AA55h になって返り、CX の bit0 が
+; 立っていれば使える。フロッピーの BIOS は持っていないことが多い。
+; ============================================================================
+check_lba:
+        push    ax
+        push    bx
+        push    cx
+        push    dx
+        mov     byte [use_lba], 0
+        mov     ah, 0x41
+        mov     bx, 0x55AA
+        mov     dl, [boot_drive]
+        int     0x13
+        jc      .out
+        cmp     bx, 0xAA55
+        jne     .out
+        test    cl, 1                   ; bit0 = 拡張読み書きが使える
+        jz      .out
+        mov     byte [use_lba], 1
 .out:
-        pop     di
         pop     dx
         pop     cx
         pop     bx
@@ -316,8 +437,8 @@ find_in_root:
         xor     ax, ax
         mov     es, ax
 
-        mov     ax, [root_lba]
-        mov     [.lba], ax
+        mov     eax, [root_lba]
+        mov     [.lba], eax
         mov     ax, [root_secs]
         mov     [.left], ax
 
@@ -325,7 +446,7 @@ find_in_root:
         cmp     word [.left], 0
         je      .not_found
 
-        mov     ax, [.lba]
+        mov     eax, [.lba]
         mov     bx, DIR_BUF
         call    read_one
         jc      .not_found
@@ -362,7 +483,7 @@ find_in_root:
         dec     bp
         jnz     .next_entry
 
-        inc     word [.lba]
+        inc     dword [.lba]
         dec     word [.left]
         jmp     .next_sector
 
@@ -386,39 +507,115 @@ find_in_root:
         ret
 
 .name:  dw 0
-.lba:   dw 0
+.lba:   dd 0
 .left:  dw 0
 
 ; ============================================================================
-; fat_next - FAT12 のエントリを引いて次のクラスタ番号を得る
+; fat_next - FAT のエントリを引いて次のクラスタ番号を得る
 ;   入力: AX = 現在のクラスタ
-;   出力: AX = 次のクラスタ (0xFF8 以上なら終端)
+;   出力: AX = 次のクラスタ (終端なら fat_eof 以上)
 ;
-; FAT12 は 1 エントリ 12bit なので、2 エントリで 3 バイトを共有する。
+; FAT は丸ごと読まず、要る 2 セクタだけをそのつど読む。FAT16 の 40MB
+; パーティションでは FAT が 40KB あり、丸ごと置くとカーネルのロード先
+; (0x10000) とぶつかるため。2 セクタ読むのは FAT12 のエントリが
+; セクタ境界をまたぐことがあるから。
+;
+; FAT12 は 1 エントリ 12bit なので 2 エントリで 3 バイトを共有する。
 ; クラスタ n のエントリは FAT の n + n/2 バイト目から 16bit 読み、
-; n が偶数なら下位 12bit、奇数なら上位 12bit を取る。
+; n が偶数なら下位 12bit、奇数なら上位 12bit。
+; FAT16 は素直に n * 2 バイト目の 16bit そのもの。
 ; ============================================================================
 fat_next:
         push    bx
         push    cx
+        push    dx
+        push    si
+        push    es
 
-        mov     bx, ax
-        mov     cx, ax
-        shr     cx, 1
-        add     bx, cx                  ; BX = n + n/2
-        add     bx, FAT_BUF
-        mov     cx, ax                  ; 奇偶の判定用に残す
-        mov     ax, [bx]                ; 16bit まとめて読む
+        xor     cx, cx
+        mov     es, cx                  ; FAT_BUF はセグメント 0
 
-        test    cx, 1
+        ; FAT の何バイト目か
+        cmp     byte [is_fat16], 0
+        je      .fat12
+        movzx   ebx, ax
+        shl     ebx, 1
+        jmp     .have_off
+.fat12:
+        movzx   ebx, ax
+        mov     ecx, ebx
+        shr     ecx, 1
+        add     ebx, ecx                ; n + n/2
+.have_off:
+        mov     si, ax                  ; 奇偶の判定用に残す
+
+        ; そのバイトが入っているセクタを読む
+        mov     eax, ebx
+        shr     eax, 9                  ; / 512
+        and     bx, 0x01FF              ; セクタ内のずれ
+        call    fat_load
+        jc      .bad
+
+        mov     ax, [es:FAT_BUF + bx]
+
+        cmp     byte [is_fat16], 0
+        jne     .done
+        test    si, 1
         jz      .even
         shr     ax, 4                   ; 奇数クラスタは上位 12bit
         jmp     .done
 .even:
         and     ax, 0x0FFF              ; 偶数クラスタは下位 12bit
 .done:
+        pop     es
+        pop     si
+        pop     dx
         pop     cx
         pop     bx
+        ret
+.bad:
+        mov     ax, 0xFFFF              ; 読めなかったら終端扱い
+        jmp     .done
+
+; ============================================================================
+; fat_load - FAT の EAX セクタ目 (FAT の先頭から数えて) を FAT_BUF に載せる
+;   出力: CF=1 なら読めなかった
+;
+; 同じセクタが続けて要求されることが多いので、いま載っているものを覚えて
+; おいて読み直しを省く。クラスタ連鎖を辿るときはたいてい隣のエントリを
+; 続けて引くので、これが効く。
+; ============================================================================
+fat_load:
+        push    eax
+        push    bx
+        push    cx
+        push    es
+        cmp     eax, [fat_cur]
+        je      .hit
+
+        mov     [fat_cur], eax
+        movzx   ecx, word [reserved_secs]
+        add     eax, ecx                ; FAT1 の中の位置 → ボリューム相対 LBA
+        xor     cx, cx
+        mov     es, cx
+        mov     bx, FAT_BUF
+        mov     cx, 2                   ; 12bit のエントリが境界をまたぐので 2 枚
+        call    read_sectors
+        jc      .fail
+.hit:
+        pop     es
+        pop     cx
+        pop     bx
+        pop     eax
+        clc
+        ret
+.fail:
+        mov     dword [fat_cur], 0xFFFFFFFF
+        pop     es
+        pop     cx
+        pop     bx
+        pop     eax
+        stc
         ret
 
 ; ============================================================================
@@ -438,13 +635,16 @@ load_chain:
         mov     ax, [.clus]
         cmp     ax, 2
         jb      .done                   ; 0/1 は正規のクラスタ番号ではない
-        cmp     ax, 0x0FF8
+        cmp     ax, [fat_eof]
         jae     .done                   ; 終端
 
-        ; クラスタ番号 → LBA
+        ; クラスタ番号 → LBA (32bit で計算する。FAT16 のパーティションでは
+        ; 16bit に収まらない)
         sub     ax, 2
-        mul     word [sec_per_clus]
-        add     ax, [data_lba]
+        movzx   eax, ax
+        movzx   ecx, word [sec_per_clus]
+        mul     ecx
+        add     eax, [data_lba]
 
         mov     cx, [sec_per_clus]
         call    read_sectors
@@ -603,6 +803,13 @@ root_entries:   dw 0
 secs_per_fat:   dw 0
 secs_per_track: dw 0
 num_heads:      dw 0
-root_lba:       dw 0
+part_lba:       dd 0            ; このボリュームの先頭 (絶対 LBA)
+is_fat16:       db 0            ; 1 なら FAT16
+                align 2
+fat_eof:        dw 0x0FF8       ; これ以上なら連鎖の終わり
+fat_cur:        dd 0xFFFFFFFF   ; FAT_BUF に載っているセクタ
+use_lba:        db 0            ; INT 13h の拡張読み込みが使えるか
+                align 2
+root_lba:       dd 0
 root_secs:      dw 0
-data_lba:       dw 0
+data_lba:       dd 0

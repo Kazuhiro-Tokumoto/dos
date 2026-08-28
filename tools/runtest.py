@@ -46,6 +46,7 @@ REQUIRED = [
     ("Format complete.", "FORMAT が別のフロッピーを FAT12 で作り直す"),
     ("System transferred", "SYS がブートローダとシステムファイルを移す"),
     ("Directory of B:\\", "DIR がドライブ指定を見る"),
+    ("Master boot record written.", "FDISK がマスターブートレコードを書く"),
 ]
 
 # XMSTEST / CFGTEST / HDTEST / DOSINT / FCBTEST / DOSTEST / ENVTEST の
@@ -57,7 +58,8 @@ EXPECTED_SUITES = 10
 BOOT_MARKER = "MYDOS Command Interpreter"
 
 
-def run(image, timeout, qemu, keep_log, hd, fdb=None, verify_boot=None):
+def run(image, timeout, qemu, keep_log, hd, fdb=None,
+        verify_fd=None, verify_hd=None):
     log_path = os.path.join(os.path.dirname(image) or ".", "serial.log")
     if os.path.exists(log_path):
         os.remove(log_path)
@@ -140,8 +142,14 @@ def run(image, timeout, qemu, keep_log, hd, fdb=None, verify_boot=None):
               f"出力の確認 {len(REQUIRED) - len(missing)}/{len(REQUIRED)} 件")
         return 1
 
-    if verify_boot:
-        rc = boot_check(verify_boot, qemu, timeout)
+    if verify_fd:
+        rc = boot_check(verify_fd, qemu, timeout, "-fda", "a",
+                        "FORMAT + SYS で作ったフロッピー")
+        if rc:
+            return rc
+    if verify_hd:
+        rc = boot_check(verify_hd, qemu, timeout, "-hda", "c",
+                        "FDISK + FORMAT + SYS で入れたハードディスク")
         if rc:
             return rc
 
@@ -149,18 +157,19 @@ def run(image, timeout, qemu, keep_log, hd, fdb=None, verify_boot=None):
     return 0
 
 
-def boot_check(image, qemu, timeout):
-    """MYDOS 自身が FORMAT + SYS で作ったディスクから、本当に起動できるか。
+def boot_check(image, qemu, timeout, media, boot_order, label):
+    """MYDOS 自身が用意したディスクから、本当に起動できるか。
 
-    テストの中で作られた 2 台目のフロッピーを、今度は 1 台目として起動する。
+    テストの中で作られたディスクを、今度は起動ディスクとして立ち上げる。
     ブートセクタ・Stage2・IO.SYS・COMMAND.COM が揃って初めてここまで来る。
+    ハードディスクの場合はさらに MBR も要る。
     """
     log_path = os.path.join(os.path.dirname(image) or ".", "bootcheck.log")
     if os.path.exists(log_path):
         os.remove(log_path)
-    cmd = [qemu, "-fda", image, "-boot", "a", "-display", "none",
+    cmd = [qemu, media, image, "-boot", boot_order, "-display", "none",
            "-no-reboot", "-serial", f"file:{log_path}"]
-    print("\n--- MYDOS が作ったディスクから起動してみる ---")
+    print(f"\n--- {label}から起動してみる ---")
     print("$ " + " ".join(cmd))
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     deadline = time.time() + min(timeout, 60)
@@ -188,9 +197,9 @@ def boot_check(image, qemu, timeout):
         os.remove(log_path)
     print(text.replace("\r\n", "\n").rstrip())
     if BOOT_MARKER not in text:
-        print("\n判定: 失敗 — FORMAT と SYS で作ったディスクから起動できなかった")
+        print(f"\n判定: 失敗 — {label}から起動できなかった")
         return 1
-    print("  [PASS] FORMAT + SYS で作ったディスクが起動する")
+    print(f"  [PASS] {label}が起動する")
     return 0
 
 
@@ -202,11 +211,13 @@ def main():
     ap.add_argument("--keep-log", action="store_true")
     ap.add_argument("--hd", help="ハードディスクのイメージ (C: / D: になる)")
     ap.add_argument("--fdb", help="2 台目のフロッピー (B: になる)")
-    ap.add_argument("--verify-boot",
-                    help="テストのあと、このイメージから起動できるか確かめる")
+    ap.add_argument("--verify-boot-fd",
+                    help="テストのあと、このフロッピーから起動できるか確かめる")
+    ap.add_argument("--verify-boot-hd",
+                    help="テストのあと、このハードディスクから起動できるか確かめる")
     args = ap.parse_args()
     sys.exit(run(args.image, args.timeout, args.qemu, args.keep_log, args.hd,
-                 args.fdb, args.verify_boot))
+                 args.fdb, args.verify_boot_fd, args.verify_boot_hd))
 
 
 if __name__ == "__main__":
