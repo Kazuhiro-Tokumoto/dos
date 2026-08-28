@@ -245,7 +245,7 @@ fcb_sft:
         cmp     byte [es:di + FCB_MAGIC], FCB_OPEN_MAGIC
         jne     .bad
         mov     al, [es:di + FCB_SFTNO]
-        cmp     al, SFT_ENTRIES
+        cmp     al, [sft_count]
         jae     .bad
         call    sft_addr
         cmp     word [si + SFT_REFCNT], 0

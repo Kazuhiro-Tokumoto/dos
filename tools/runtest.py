@@ -32,11 +32,17 @@ REQUIRED = [
     ("OVERLAY-RELOC: PASS", "AH=4Bh AL=3 オーバーレイのリロケーション"),
     ("C:\\>", "COMMAND.COM のドライブ切り替え (C:)"),
     ("Directory of C:\\", "DIR がハードディスク側を読む"),
+    ("MYDEV.SYS installed, args=hello-from-config",
+     "CONFIG.SYS の DEVICE= が引数付きで文字デバイスを組み込む"),
+    ("RAMDISK.SYS installed as drive",
+     "CONFIG.SYS の DEVICE= がブロックデバイスを組み込む"),
+    ("INSTALL: instest ran with args: alpha beta",
+     "CONFIG.SYS の INSTALL= がプログラムを引数付きで実行する"),
 ]
 
-# HDTEST / DOSINT / FCBTEST / DOSTEST の 4 本が、
+# CFGTEST / HDTEST / DOSINT / FCBTEST / DOSTEST の 5 本が、
 # それぞれ集計行と終了の目印を出す。
-EXPECTED_SUITES = 4
+EXPECTED_SUITES = 5
 
 
 def run(image, timeout, qemu, keep_log, hd):

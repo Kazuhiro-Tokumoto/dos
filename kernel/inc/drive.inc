@@ -301,15 +301,118 @@ disk_flush_fat:
 ; disk_read_drive / disk_write_drive - ドライブ番号つきの入口
 ;   入力: EAX = LBA (パーティション先頭からの相対), CX = セクタ数,
 ;         ES:BX = バッファ, DL = ドライブ番号
+;   出力: CF=1 なら失敗
 ;
-; disk.inc の disk_read / disk_write がそのまま同じ約束なので、
-; 名前だけ残した別名にしてある。
+; どのドライブも、扱うのはデバイスドライバ。組み込みのブロックデバイス
+; (dev_block) が担当しているなら INT 13h を直に叩き、CONFIG.SYS の DEVICE=
+; で入れたドライバが担当しているならそちらを呼ぶ。
+;
+; dev_block を特別扱いしているのは速さのためではなく、再帰を避けるため。
+; dev_block の READ ハンドラ自身が disk_read を呼ぶので、ここで区別せずに
+; ドライバを呼ぶと自分に戻ってきてしまう。
 ; ---------------------------------------------------------------------------
 disk_read_drive:
-        jmp     disk_read
+        push    si
+        xor     si, si                  ; 0 = 読み込み
+        call    drive_xfer
+        pop     si
+        ret
 
 disk_write_drive:
+        push    si
+        mov     si, 1                   ; 1 = 書き込み
+        call    drive_xfer
+        pop     si
+        ret
+
+; ---------------------------------------------------------------------------
+; drive_xfer - ドライブ表を見て転送先を振り分ける
+;   入力: EAX = LBA, CX = セクタ数, ES:BX = バッファ, DL = ドライブ, SI = 向き
+; ---------------------------------------------------------------------------
+drive_xfer:
+        push    di
+        push    ax
+        mov     al, dl
+        call    drive_entry
+        pop     ax
+        jc      .fail
+
+        test    byte [di + DRV_FLAGS], DRVF_EXTERNAL
+        jnz     .external
+
+        pop     di
+        test    si, si
+        jnz     .int13_write
+        jmp     disk_read
+.int13_write:
         jmp     disk_write
+
+.external:
+        call    drive_dev_xfer
+        pop     di
+        ret
+.fail:
+        pop     di
+        stc
+        ret
+
+; ---------------------------------------------------------------------------
+; drive_dev_xfer - 外部ドライバに読み書きさせる
+;   入力: EAX = LBA, CX = セクタ数, ES:BX = バッファ, SI = 向き,
+;         DI = ドライブ表のエントリ
+;
+; 要求ヘッダの開始セクタは 16bit しかない。65535 を超えるときは
+; そこに FFFFh を入れて、32bit の欄 (+1Ah) に本当の値を置く。
+; DOS 4.0 で 32MB の壁を越えるために足された約束で、ドライバ側は
+; ヘッダの長さ (26 バイト) を見てどちらか判断する。
+; ---------------------------------------------------------------------------
+drive_dev_xfer:
+        pushad
+        push    es
+
+        mov     byte [cs:req_packet + REQ_LENGTH], 30
+        mov     dl, [di + DRV_UNIT]
+        mov     [cs:req_packet + REQ_UNIT], dl
+        mov     dl, DEVC_READ
+        test    si, si
+        jz      .have_cmd
+        mov     dl, DEVC_WRITE
+.have_cmd:
+        mov     [cs:req_packet + REQ_CMD], dl
+        mov     word [cs:req_packet + REQ_STATUS], 0
+        mov     dl, [di + DRV_MEDIA]
+        mov     [cs:req_packet + REQ_MEDIA], dl
+        mov     [cs:req_packet + REQ_BUFFER], bx
+        mov     dx, es
+        mov     [cs:req_packet + REQ_BUFFER + 2], dx
+        mov     [cs:req_packet + REQ_COUNT], cx
+
+        add     eax, [di + DRV_PARTLBA]         ; 通常は 0
+        mov     [cs:req_packet + REQ_STARTL], eax
+        cmp     eax, 0xFFFF
+        jbe     .small
+        mov     word [cs:req_packet + REQ_START], 0xFFFF
+        jmp     .go
+.small:
+        mov     [cs:req_packet + REQ_START], ax
+.go:
+        push    ds
+        push    cs
+        pop     ds
+        les     si, [di + DRV_DRIVER]
+        call    dev_call
+        pop     ds
+        jc      .fail
+
+        pop     es
+        popad
+        clc
+        ret
+.fail:
+        pop     es
+        popad
+        stc
+        ret
 
 ; ============================================================================
 ; 起動時のドライブ検出
@@ -435,6 +538,7 @@ drive_try_floppy:
         mov     byte [di + DRV_USEEXT], 0
         mov     dword [di + DRV_PARTLBA], 0
         mov     byte [di + DRV_FLAGS], DRVF_PRESENT | DRVF_REMOVABLE
+        call    drive_use_builtin
 
         ; ジオメトリを BIOS に聞く。答えられないドライブは無いものとする。
         call    disk_geometry           ; CX = セクタ/トラック, DX = ヘッド数
@@ -456,6 +560,19 @@ drive_try_floppy:
         pop     dx
         pop     cx
         pop     bx
+        pop     ax
+        ret
+
+; ---------------------------------------------------------------------------
+; drive_use_builtin - このドライブは組み込みのブロックデバイスが扱う
+;   入力: AL = ドライブ番号, DI = ドライブ表のエントリ
+; ---------------------------------------------------------------------------
+drive_use_builtin:
+        push    ax
+        mov     word [di + DRV_DRIVER], dev_block
+        mov     [di + DRV_UNIT], al
+        mov     ax, cs
+        mov     [di + DRV_DRIVER + 2], ax
         pop     ax
         ret
 
@@ -510,6 +627,7 @@ drive_try_hd:
         mov     cx, [.heads]
         mov     [di + DRV_HEADS], cx
         mov     byte [di + DRV_FLAGS], DRVF_PRESENT
+        call    drive_use_builtin
 
         push    ds
         pop     es
@@ -564,6 +682,7 @@ drive_try_hd:
         mov     cx, [.heads]
         mov     [di + DRV_HEADS], cx
         mov     byte [di + DRV_FLAGS], DRVF_PRESENT
+        call    drive_use_builtin
 
         push    si
         mov     al, [.next]
@@ -730,6 +849,241 @@ drive_read_bpb:
 .no_ext:
 
         ; --- レイアウトを計算する ---
+        call    drive_layout
+        jc      .bad
+
+        pop     es
+        pop     si
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     eax
+        clc
+        ret
+.bad:
+        pop     es
+        pop     si
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     eax
+        stc
+        ret
+
+; ---------------------------------------------------------------------------
+; dpb_build - そのドライブの DPB を組み立てる
+;   入力: AL = ドライブ番号 (表の値が埋まっていること)
+;
+; DOS が各ドライブについて持っている構造体。AH=32h でプログラムに直接
+; 渡され、List of Lists からも辿れる。当時のディスクツール
+; (CHKDSK、デフラグ、セクタエディタの類) はここからジオメトリを読む。
+; BPB を読み直すのではなく DPB を見るのが正しい作法とされていた。
+; ---------------------------------------------------------------------------
+dpb_build:
+        push    ax
+        push    bx
+        push    cx
+        push    dx
+        push    di
+
+        push    ax
+        call    drive_slot
+        mov     bx, di
+        add     bx, DRV_DPB
+        pop     ax
+
+        mov     [bx + DPB_DRIVE], al
+        mov     word [bx + DPB_SECSIZE], SECTOR_SIZE
+
+        mov     ax, [di + DRV_SECPERCLUS]
+        dec     ax
+        mov     [bx + DPB_CLUSMASK], al         ; クラスタ内の最大セクタ番号
+
+        ; クラスタ→セクタの変換に使うシフト量 (sec_per_clus の log2)
+        mov     ax, [di + DRV_SECPERCLUS]
+        xor     cl, cl
+.shift:
+        shr     ax, 1
+        cmp     ax, 1
+        jb      .shift_done
+        inc     cl
+        jmp     .shift
+.shift_done:
+        mov     [bx + DPB_CLUSSHIFT], cl
+
+        mov     ax, [di + DRV_RESERVED]
+        mov     [bx + DPB_RESERVED], ax
+        mov     ax, [di + DRV_NUMFATS]
+        mov     [bx + DPB_NUMFATS], al
+        mov     ax, [di + DRV_ROOTENT]
+        mov     [bx + DPB_ROOTENT], ax
+        mov     ax, [di + DRV_DATALBA]
+        mov     [bx + DPB_DATASEC], ax
+        mov     ax, [di + DRV_MAXCLUS]
+        dec     ax
+        mov     [bx + DPB_MAXCLUS], ax          ; 最大クラスタ番号
+        mov     ax, [di + DRV_SECPERFAT]
+        mov     [bx + DPB_SECPERFAT], ax
+        mov     ax, [di + DRV_ROOTLBA]
+        mov     [bx + DPB_DIRSEC], ax
+        mov     al, [di + DRV_MEDIA]
+        mov     [bx + DPB_MEDIA], al
+        mov     byte [bx + DPB_ACCESS], 0       ; 0 = アクセス済み
+        mov     word [bx + DPB_FREESRCH], 2
+        mov     word [bx + DPB_FREECNT], 0xFFFF ; 不明 (聞かれたら数える)
+
+        ; このドライブを扱うデバイスドライバ
+        mov     ax, [di + DRV_DRIVER]
+        mov     [bx + DPB_DRIVER], ax
+        mov     ax, [di + DRV_DRIVER + 2]
+        mov     [bx + DPB_DRIVER + 2], ax
+        mov     al, [di + DRV_UNIT]
+        mov     [bx + DPB_UNIT], al
+
+        ; DPB は連鎖している。次に実在するドライブの DPB へ繋ぐ。
+        mov     dword [bx + DPB_NEXT], 0xFFFFFFFF
+        mov     al, [bx + DPB_DRIVE]
+.chain:
+        inc     al
+        cmp     al, MAX_DRIVES
+        jae     .chain_done
+        push    ax
+        call    drive_entry
+        pop     ax
+        jc      .chain
+        mov     cx, di
+        add     cx, DRV_DPB
+        mov     [bx + DPB_NEXT], cx
+        mov     cx, cs
+        mov     [bx + DPB_NEXT + 2], cx
+.chain_done:
+
+        pop     di
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        ret
+
+; ---------------------------------------------------------------------------
+; drive_add_external - DEVICE= で入れたドライバのドライブを表に足す
+;   入力: AL = ドライブ番号, DL = ドライバ内のユニット番号,
+;         ES:SI = そのユニットの BPB (25 バイト),
+;         CX:BX = デバイスドライバのヘッダ (CX = セグメント)
+;   出力: CF=1 なら BPB がおかしくて使えない
+;
+; INT 13h を通らないドライブ。読み書きは drive_xfer がドライバへ回す。
+; BPB の形は BUILD BPB がドライバに返させるものと同じで、
+; 「セクタあたりバイト数」から「隠しセクタ数」までが並んでいる。
+; ---------------------------------------------------------------------------
+drive_add_external:
+        push    ax
+        push    bx
+        push    cx
+        push    dx
+        push    di
+
+        push    ax
+        call    drive_slot              ; DI = 表のエントリ
+        pop     ax
+
+        cmp     word [es:si + 0x00], SECTOR_SIZE
+        jne     .bad
+
+        mov     [di + DRV_UNIT], dl
+        mov     [di + DRV_DRIVER], bx
+        mov     [di + DRV_DRIVER + 2], cx
+        mov     dword [di + DRV_PARTLBA], 0
+        mov     byte [di + DRV_PHYS], 0
+        mov     byte [di + DRV_USEEXT], 0
+
+        movzx   dx, byte [es:si + 0x02] ; セクタ/クラスタ
+        test    dl, dl
+        jz      .bad
+        mov     [di + DRV_SECPERCLUS], dx
+
+        mov     dx, [es:si + 0x03]      ; 予約セクタ数
+        test    dx, dx
+        jz      .bad
+        mov     [di + DRV_RESERVED], dx
+
+        movzx   dx, byte [es:si + 0x05] ; FAT の数
+        test    dl, dl
+        jz      .bad
+        mov     [di + DRV_NUMFATS], dx
+
+        mov     dx, [es:si + 0x06]      ; ルートのエントリ数
+        test    dx, dx
+        jz      .bad
+        mov     [di + DRV_ROOTENT], dx
+
+        mov     dl, [es:si + 0x0A]      ; メディアディスクリプタ
+        mov     [di + DRV_MEDIA], dl
+
+        mov     dx, [es:si + 0x0B]      ; FAT 1 個のセクタ数
+        test    dx, dx
+        jz      .bad
+        mov     [di + DRV_SECPERFAT], dx
+
+        mov     dx, [es:si + 0x0D]      ; セクタ/トラック (使わないが控える)
+        mov     [di + DRV_SECPERTRK], dx
+        mov     dx, [es:si + 0x0F]      ; ヘッド数
+        mov     [di + DRV_HEADS], dx
+
+        ; 総セクタ数。16bit 版が 0 なら 32bit 版 (+15h) を見る
+        push    eax
+        movzx   eax, word [es:si + 0x08]
+        test    eax, eax
+        jnz     .have_total
+        mov     eax, [es:si + 0x15]
+        test    eax, eax
+        jz      .bad_pop
+.have_total:
+        mov     [di + DRV_TOTALSEC], eax
+        pop     eax
+
+        mov     dword [di + DRV_SERIAL], 0
+        mov     byte [di + DRV_FLAGS], DRVF_PRESENT | DRVF_EXTERNAL
+
+        call    drive_layout
+        jc      .bad
+
+        push    ax
+        call    dpb_build
+        pop     ax
+
+        pop     di
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        clc
+        ret
+.bad_pop:
+        pop     eax
+.bad:
+        mov     byte [di + DRV_FLAGS], 0
+        pop     di
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        stc
+        ret
+
+; ---------------------------------------------------------------------------
+; drive_layout - BPB から求まる位置とクラスタ数を計算する
+;   入力: DI = ドライブ表のエントリ (BPB 由来の値が埋まっていること)
+;   出力: CF=1 ならつじつまが合わない
+;
+; BPB を INT 13h 経由で読んだ場合も、ドライバから受け取った場合も、
+; ここから先の計算は同じ。
+; ---------------------------------------------------------------------------
+drive_layout:
+        push    eax
+        push    ecx
+        push    edx
+
         mov     ax, [di + DRV_NUMFATS]
         mul     word [di + DRV_SECPERFAT]
         add     ax, [di + DRV_RESERVED]
@@ -778,116 +1132,16 @@ drive_read_bpb:
         cmp     word [di + DRV_SECPERFAT], FAT_RESIDENT_SECS
         ja      .bad
 .size_ok:
-
-        pop     es
-        pop     si
-        pop     dx
-        pop     cx
-        pop     bx
+        pop     edx
+        pop     ecx
         pop     eax
         clc
         ret
 .bad:
-        pop     es
-        pop     si
-        pop     dx
-        pop     cx
-        pop     bx
+        pop     edx
+        pop     ecx
         pop     eax
         stc
-        ret
-
-; ---------------------------------------------------------------------------
-; dpb_build - そのドライブの DPB を組み立てる
-;   入力: AL = ドライブ番号 (表の値が埋まっていること)
-;
-; DOS が各ドライブについて持っている構造体。AH=32h でプログラムに直接
-; 渡され、List of Lists からも辿れる。当時のディスクツール
-; (CHKDSK、デフラグ、セクタエディタの類) はここからジオメトリを読む。
-; BPB を読み直すのではなく DPB を見るのが正しい作法とされていた。
-; ---------------------------------------------------------------------------
-dpb_build:
-        push    ax
-        push    bx
-        push    cx
-        push    dx
-        push    di
-
-        push    ax
-        call    drive_slot
-        mov     bx, di
-        add     bx, DRV_DPB
-        pop     ax
-
-        mov     [bx + DPB_DRIVE], al
-        mov     [bx + DPB_UNIT], al
-        mov     word [bx + DPB_SECSIZE], SECTOR_SIZE
-
-        mov     ax, [di + DRV_SECPERCLUS]
-        dec     ax
-        mov     [bx + DPB_CLUSMASK], al         ; クラスタ内の最大セクタ番号
-
-        ; クラスタ→セクタの変換に使うシフト量 (sec_per_clus の log2)
-        mov     ax, [di + DRV_SECPERCLUS]
-        xor     cl, cl
-.shift:
-        shr     ax, 1
-        cmp     ax, 1
-        jb      .shift_done
-        inc     cl
-        jmp     .shift
-.shift_done:
-        mov     [bx + DPB_CLUSSHIFT], cl
-
-        mov     ax, [di + DRV_RESERVED]
-        mov     [bx + DPB_RESERVED], ax
-        mov     ax, [di + DRV_NUMFATS]
-        mov     [bx + DPB_NUMFATS], al
-        mov     ax, [di + DRV_ROOTENT]
-        mov     [bx + DPB_ROOTENT], ax
-        mov     ax, [di + DRV_DATALBA]
-        mov     [bx + DPB_DATASEC], ax
-        mov     ax, [di + DRV_MAXCLUS]
-        dec     ax
-        mov     [bx + DPB_MAXCLUS], ax          ; 最大クラスタ番号
-        mov     ax, [di + DRV_SECPERFAT]
-        mov     [bx + DPB_SECPERFAT], ax
-        mov     ax, [di + DRV_ROOTLBA]
-        mov     [bx + DPB_DIRSEC], ax
-        mov     al, [di + DRV_MEDIA]
-        mov     [bx + DPB_MEDIA], al
-        mov     byte [bx + DPB_ACCESS], 0       ; 0 = アクセス済み
-        mov     word [bx + DPB_FREESRCH], 2
-        mov     word [bx + DPB_FREECNT], 0xFFFF ; 不明 (聞かれたら数える)
-
-        ; デバイスドライバのヘッダ (ブロックデバイス)
-        mov     word [bx + DPB_DRIVER], dev_block
-        mov     ax, cs
-        mov     [bx + DPB_DRIVER + 2], ax
-
-        ; DPB は連鎖している。次に実在するドライブの DPB へ繋ぐ。
-        mov     dword [bx + DPB_NEXT], 0xFFFFFFFF
-        mov     al, [bx + DPB_DRIVE]
-.chain:
-        inc     al
-        cmp     al, MAX_DRIVES
-        jae     .chain_done
-        push    ax
-        call    drive_entry
-        pop     ax
-        jc      .chain
-        mov     cx, di
-        add     cx, DRV_DPB
-        mov     [bx + DPB_NEXT], cx
-        mov     cx, cs
-        mov     [bx + DPB_NEXT + 2], cx
-.chain_done:
-
-        pop     di
-        pop     dx
-        pop     cx
-        pop     bx
-        pop     ax
         ret
 
 ; ---------------------------------------------------------------------------

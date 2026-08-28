@@ -1,0 +1,17 @@
+REM MYDOS test configuration.
+REM A line without '=' is a comment, so REM needs no special handling.
+
+FILES=30
+BUFFERS=12
+LASTDRIVE=H
+FCBS=8,0
+STACKS=9,256
+BREAK=ON
+DOS=HIGH,UMB
+
+DEVICE=\MYDEV.SYS hello-from-config
+DEVICE=\RAMDISK.SYS
+
+INSTALL=\INSTEST.COM alpha beta
+
+SHELL=A:\COMMAND.COM

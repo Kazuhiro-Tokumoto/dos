@@ -17,6 +17,7 @@
 
 ; ---------------------------------------------------------------------------
 ; sft_init - SFT を初期化し、先頭の 3 つをデバイスに割り当てる
+;   入力: AL = 使うエントリ数 (CONFIG.SYS の FILES=)
 ; ---------------------------------------------------------------------------
 sft_init:
         push    ax
@@ -29,13 +30,25 @@ sft_init:
         push    ds
         pop     es
 
+        ; 少なすぎても多すぎても困るので範囲に収める
+        cmp     al, 8
+        jae     .min_ok
+        mov     al, 8
+.min_ok:
+        cmp     al, MAX_SFT_ENTRIES
+        jbe     .max_ok
+        mov     al, MAX_SFT_ENTRIES
+.max_ok:
+        mov     [sft_count], al
+
         ; テーブルのヘッダ。List of Lists の +04 がここを指す。
         mov     word [sft_header + SFTH_NEXT], 0xFFFF
         mov     word [sft_header + SFTH_NEXT + 2], 0xFFFF
-        mov     word [sft_header + SFTH_COUNT], SFT_ENTRIES
+        movzx   ax, al
+        mov     [sft_header + SFTH_COUNT], ax
 
         mov     di, sft_table
-        mov     cx, SFT_ENTRIES * SFT_ENTSIZE
+        mov     cx, MAX_SFT_ENTRIES * SFT_ENTSIZE
         xor     al, al
         rep     stosb                   ; refcnt = 0 で全部空き
 
@@ -96,8 +109,17 @@ sft_bind_char:
 ; ---------------------------------------------------------------------------
 sft_devkind:
         push    bx
+        push    cx
         test    word [si + SFT_DEVINFO], SFTI_CHAR
         jz      .file
+
+        ; 組み込みのドライバかどうかは、セグメントも見ないと分からない。
+        ; DEVICE= で入れたドライバは別のセグメントに居るので、オフセットだけ
+        ; 比べると偶然一致して CON 扱いになってしまう。
+        mov     cx, cs
+        cmp     [si + SFT_DEVPTR + 2], cx
+        jne     .other
+
         mov     bx, [si + SFT_DEVPTR]
         cmp     bx, dev_con
         je      .con
@@ -107,7 +129,15 @@ sft_devkind:
         je      .prn
         cmp     bx, dev_clock
         je      .clock
-        mov     al, SFT_DEV_NUL         ; 知らない文字デバイスは NUL 扱い
+        cmp     bx, dev_chain_head
+        je      .nul
+        ; カーネルの中にあるが名前が分からないものは、外部扱いにして
+        ; ドライバとして呼ぶ (NUL 扱いで捨ててしまうより筋が通る)
+.other:
+        mov     al, SFT_DEV_OTHER
+        jmp     .out
+.nul:
+        mov     al, SFT_DEV_NUL
         jmp     .out
 .con:
         mov     al, SFT_DEV_CON
@@ -124,6 +154,7 @@ sft_devkind:
 .file:
         mov     al, SFT_DEV_FILE
 .out:
+        pop     cx
         pop     bx
         ret
 
@@ -171,7 +202,7 @@ sft_addr:
 sft_alloc:
         push    cx
         xor     al, al
-        mov     cx, SFT_ENTRIES
+        movzx   cx, byte [sft_count]
 .loop:
         call    sft_addr
         cmp     word [si + SFT_REFCNT], 0
@@ -214,7 +245,7 @@ jft_get:
         mov     al, [es:bx + PSP_JFT]
         cmp     al, JFT_FREE
         je      .bad
-        cmp     al, SFT_ENTRIES
+        cmp     al, [sft_count]
         jae     .bad
         call    sft_addr
         cmp     word [si + SFT_REFCNT], 0
@@ -337,6 +368,16 @@ dev_check:
         add     di, 3
         inc     cl
         jmp     .try
+.found_chain:
+        mov     al, SFT_DEV_OTHER
+        pop     es
+        pop     di
+        pop     si
+        pop     cx
+        pop     bx
+        clc
+        ret
+
 .match:
         pop     di
         pop     si
@@ -351,6 +392,11 @@ dev_check:
         clc
         ret
 .not_device:
+        ; 組み込みの 4 つに無くても、DEVICE= で入れた文字デバイスかもしれない。
+        ; 連鎖を名前で引く。ここを見ないと、CONFIG.SYS で入れたドライバを
+        ; ファイルとして開けない (当時のドライバは大半がそれで使われた)。
+        call    .chain_lookup
+        jnc     .found_chain
         pop     es
         pop     di
         pop     si
@@ -358,6 +404,73 @@ dev_check:
         pop     bx
         stc
         ret
+
+; --- デバイス連鎖を名前で引く ---
+;   入力: SI = パスの最後の要素
+;   出力: CF=0 なら [dev_far] にヘッダの far アドレス
+;
+; デバイス名は 8 バイトの空白詰め。パスの要素から拡張子を落として
+; その形に直してから探す。"MYDEV" も "MYDEV.TXT" も同じデバイスを指す、
+; というのが DOS の振る舞い。
+.chain_lookup:
+        push    ax
+        push    cx
+        push    si
+        push    di
+        push    es
+
+        push    ds
+        pop     es
+        mov     di, .devname
+        mov     cx, 8
+        mov     al, ' '
+        rep     stosb                   ; まず空白で埋める
+
+        mov     di, .devname
+        mov     cx, 8
+.copy:
+        mov     al, [si]
+        test    al, al
+        jz      .copy_done
+        cmp     al, '.'
+        je      .copy_done
+        call    to_upper
+        mov     [di], al
+        inc     si
+        inc     di
+        loop    .copy
+.copy_done:
+        cmp     byte [.devname], ' '
+        je      .lookup_fail            ; 空の名前
+
+        mov     si, .devname
+        call    dev_find                ; ES:DI = ヘッダ
+        jc      .lookup_fail
+        test    word [es:di + DEV_ATTR], DEVA_CHAR
+        jz      .lookup_fail            ; ブロックデバイスは名前で開けない
+
+        mov     [dev_far], di
+        mov     ax, es
+        mov     [dev_far + 2], ax
+
+        pop     es
+        pop     di
+        pop     si
+        pop     cx
+        pop     ax
+        clc
+        ret
+.lookup_fail:
+        pop     es
+        pop     di
+        pop     si
+        pop     cx
+        pop     ax
+        stc
+        ret
+.devname:       times 8 db 0
+
+dev_far:        dd 0            ; 連鎖から見つけた文字デバイスのヘッダ
 
 dev_names:      db 'CON', 'PRN', 'AUX', 'NUL', 0
 dev_ids:        db SFT_DEV_CON, SFT_DEV_PRN, SFT_DEV_AUX, SFT_DEV_NUL
@@ -976,11 +1089,29 @@ file_read:
         jmp     .out
 
 .device:
-        ; いまのところ CON からの読み取りだけ扱う
         call    sft_devkind
         cmp     al, SFT_DEV_CON
-        jne     .eof
+        je      .from_con
+        cmp     al, SFT_DEV_OTHER
+        je      .from_driver
+        jmp     .eof                    ; NUL / PRN / CLOCK$ からは何も読めない
+.from_con:
         call    con_read_block
+        clc
+        jmp     .out
+.from_driver:
+        ; DEVICE= で入れた文字デバイス。ドライバに読み取りを頼む。
+        push    es
+        mov     dx, es                  ; DX:DI = 呼び出し側のバッファ
+        mov     ax, [si + SFT_DEVPTR + 2]
+        mov     es, ax
+        push    si
+        mov     si, [si + SFT_DEVPTR]
+        mov     al, DEVC_READ
+        call    dev_char_io
+        pop     si
+        pop     es
+        jc      .eof
         clc
         jmp     .out
 
@@ -1226,8 +1357,31 @@ file_write:
         call    sft_devkind
         cmp     al, SFT_DEV_NUL
         je      .nul
+        cmp     al, SFT_DEV_OTHER
+        je      .to_driver
         cmp     al, SFT_DEV_CON
         jne     .nul                    ; PRN / AUX は捨てる
+        jmp     .to_con
+.to_driver:
+        ; DEVICE= で入れた文字デバイス。ドライバに書き込みを頼む。
+        push    es
+        mov     dx, es                  ; DX:DI = 呼び出し側のバッファ
+        mov     ax, [si + SFT_DEVPTR + 2]
+        mov     es, ax
+        push    si
+        mov     si, [si + SFT_DEVPTR]
+        mov     al, DEVC_WRITE
+        call    dev_char_io
+        pop     si
+        pop     es
+        jc      .dev_error
+        clc
+        jmp     .out
+.dev_error:
+        mov     ax, ERR_BAD_DATA
+        stc
+        jmp     .out
+.to_con:
         ; CON へ 1 バイトずつ出す
         push    cx
         push    di
@@ -1416,6 +1570,8 @@ sft_bind_kind:
         push    dx
         push    di
         mov     dx, SFTI_CHAR | SFTI_CLEAN
+        cmp     al, SFT_DEV_OTHER
+        je      .other
         cmp     al, SFT_DEV_CON
         je      .con
         cmp     al, SFT_DEV_AUX
@@ -1440,6 +1596,24 @@ sft_bind_kind:
 .clock:
         mov     di, dev_clock
         or      dx, SFTI_CLOCK
+        jmp     .bind
+.other:
+        ; DEVICE= で入れたドライバ。カーネルの外にあるので far で結ぶ。
+        push    es
+        mov     ax, [dev_far + 2]
+        mov     es, ax
+        mov     di, [dev_far]
+        mov     word [si + SFT_REFCNT], 1
+        mov     [si + SFT_DEVINFO], dx
+        mov     [si + SFT_DEVPTR], di
+        mov     [si + SFT_DEVPTR + 2], ax
+        pop     es
+        mov     ax, [cur_psp]
+        mov     [si + SFT_OWNER], ax
+        pop     di
+        pop     dx
+        pop     ax
+        ret
 .bind:
         call    sft_bind_char
         mov     ax, [cur_psp]
@@ -1450,8 +1624,13 @@ sft_bind_kind:
         ret
 
 ; --- 変数 ------------------------------------------------------------------
+; FILES= で決まる実際のエントリ数。ヘッダの中に入れてはいけないので手前に置く。
+; ヘッダの +06 からエントリが並んでいる、というのが外から見える約束で、
+; 途中に何か挟むと SFT 連鎖を辿るツールがそこを 1 個目のエントリとして読む。
+sft_count:      db SFT_ENTRIES
+
 ; テーブルのヘッダと本体。List of Lists の +04 が sft_header を指す。
 sft_header:
                 dd 0xFFFFFFFF                   ; 次のテーブルは無い
                 dw SFT_ENTRIES
-sft_table:      times SFT_ENTRIES * SFT_ENTSIZE db 0
+sft_table:      times MAX_SFT_ENTRIES * SFT_ENTSIZE db 0

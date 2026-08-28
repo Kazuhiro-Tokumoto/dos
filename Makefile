@@ -37,8 +37,9 @@ SHELL_COM := $(BUILD)/command.com
 # ディスクに入れるテストプログラム
 PROGS := $(BUILD)/hello.com $(BUILD)/hello.exe $(BUILD)/dostest.com \
          $(BUILD)/fcbtest.com $(BUILD)/tsrtest.com $(BUILD)/ovltest.com \
-         $(BUILD)/dosint.com $(BUILD)/hdtest.com \
-         $(BUILD)/ovl.ovl
+         $(BUILD)/dosint.com $(BUILD)/hdtest.com $(BUILD)/cfgtest.com \
+         $(BUILD)/instest.com \
+         $(BUILD)/ovl.ovl $(BUILD)/mydev.sys $(BUILD)/ramdisk.sys
 
 KDEPS := kernel/io.asm $(wildcard $(INCDIR)/*.inc)
 
@@ -75,6 +76,11 @@ $(BUILD)/hello.exe: tests/hellox.asm tools/mkexe.py | $(BUILD)
 	$(NASM) $(NASMFLAGS) tests/hellox.asm -o $(BUILD)/hellox.bin
 	$(PYTHON) tools/mkexe.py $(BUILD)/hellox.bin -o $@ -v
 
+# インストール可能デバイスドライバ。実行ファイルではなく、デバイスヘッダが
+# 先頭に置かれただけのバイナリ。入口もリロケーションも無い。
+$(BUILD)/%.sys: tests/%.asm | $(BUILD)
+	$(NASM) $(NASMFLAGS) $< -o $@
+
 # オーバーレイも MZ 形式。AH=4Bh AL=3 はリロケーションだけを当てる。
 $(BUILD)/ovl.ovl: tests/ovlbody.asm tools/mkexe.py | $(BUILD)
 	$(NASM) $(NASMFLAGS) tests/ovlbody.asm -o $(BUILD)/ovlbody.bin
@@ -98,12 +104,17 @@ define make_image
 	$(MCOPY) -i $(1) -o $(BUILD)/ovltest.com ::OVLTEST.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/dosint.com ::DOSINT.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/hdtest.com ::HDTEST.COM
+	$(MCOPY) -i $(1) -o $(BUILD)/cfgtest.com ::CFGTEST.COM
+	$(MCOPY) -i $(1) -o $(BUILD)/instest.com ::INSTEST.COM
+	$(MCOPY) -i $(1) -o $(BUILD)/mydev.sys ::MYDEV.SYS
+	$(MCOPY) -i $(1) -o $(BUILD)/ramdisk.sys ::RAMDISK.SYS
+	$(MCOPY) -i $(1) -o tests/config.sys ::CONFIG.SYS
 	$(MCOPY) -i $(1) -o $(BUILD)/ovl.ovl ::OVL.OVL
 	$(MCOPY) -i $(1) -o tests/readme.txt ::README.TXT
 	$(MCOPY) -i $(1) -o $(3) ::AUTOEXEC.BAT
 endef
 
-IMGDEPS := $(STAGE1) $(STAGE2) $(SHELL_COM) $(PROGS) tests/readme.txt
+IMGDEPS := $(STAGE1) $(STAGE2) $(SHELL_COM) $(PROGS) tests/readme.txt tests/config.sys
 
 $(IMG): $(KERNEL) $(IMGDEPS) tests/autoexec.bat
 	$(call make_image,$@,$(KERNEL),tests/autoexec.bat)

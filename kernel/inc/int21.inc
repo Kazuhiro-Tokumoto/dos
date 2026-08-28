@@ -593,6 +593,10 @@ f_44:
         jz      .get_info
         cmp     al, 1
         je      .set_info
+        cmp     al, 0x02
+        je      .ioctl_read
+        cmp     al, 0x03
+        je      .ioctl_write
         cmp     al, 0x08
         je      .removable
         cmp     al, 0x09
@@ -624,6 +628,52 @@ f_44:
 
 .set_info:
         jmp     int21_ok
+
+.ioctl_read:
+        ; AL=02h: 文字デバイスから制御情報を受け取る
+        ;   BX = ハンドル, CX = バイト数, DS:DX = バッファ
+        ; ドライバの IOCTL 読み取り (コマンド 3) をそのまま呼ぶ。
+        ; 当時のドライバは、これで設定値や状態を返していた。
+        mov     al, DEVC_IOCTLREAD
+        jmp     .ioctl_common
+.ioctl_write:
+        ; AL=03h: 文字デバイスへ制御情報を送る (コマンド 12)
+        mov     al, DEVC_IOCTLWRITE
+.ioctl_common:
+        push    ax
+        mov     bx, [u_bx]
+        call    jft_get
+        pop     ax
+        jc      .bad_handle
+        test    word [si + SFT_DEVINFO], SFTI_CHAR
+        jz      .not_char
+
+        push    ax
+        mov     ax, [si + SFT_DEVPTR + 2]
+        mov     [.devseg], ax
+        mov     ax, [si + SFT_DEVPTR]
+        mov     [.devoff], ax
+        pop     ax
+
+        push    es
+        mov     es, [.devseg]
+        mov     si, [.devoff]
+        mov     cx, [u_cx]
+        mov     dx, [u_ds]
+        mov     di, [u_dx]
+        call    dev_char_io
+        pop     es
+        jc      .ioctl_fail
+        mov     [u_ax], ax
+        jmp     int21_ok
+.ioctl_fail:
+        mov     ax, ERR_BAD_DATA
+        jmp     int21_err
+.not_char:
+        mov     ax, ERR_FUNC
+        jmp     int21_err
+.devseg: dw 0
+.devoff: dw 0
 
 .removable:
         ; AL=08h: そのドライブのメディアは交換できるか

@@ -940,6 +940,14 @@ do_exec:
         mov     ss, bx
         mov     sp, ax
 
+        ; INT 21h の入れ子の深さも積んでおく。子は AH=4Ch で終わるが、
+        ; その AH=4Ch は「戻ってこない呼び出し」なので、そのままだと
+        ; 深さが 1 段ずつ増えたまま戻らない。プログラムを起動するたびに
+        ; 深くなっていき、何本か走らせたところで DOS が呼び出しを
+        ; 受け付けなくなる。ここで控えて exec_return で戻す。
+        movzx   ax, byte [indos_flag]
+        push    ax
+
         push    word [u_ds]
         push    word [u_es]
         push    word [u_bp]
@@ -1018,6 +1026,10 @@ exec_return:
         pop     word [u_bp]
         pop     word [u_es]
         pop     word [u_ds]
+
+        ; AH=4Bh を呼ばれたときの入れ子の深さに戻す
+        pop     ax
+        mov     [indos_flag], al
 
         ; いまの SS:SP が、AH=4Bh を呼んだときの IRET フレームを指している
         mov     [u_ss], ss

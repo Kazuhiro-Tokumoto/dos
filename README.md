@@ -8,9 +8,9 @@
 **INT 21h は 6.22 の 103 機能をすべて実装済み**（FCB 系、常駐終了、
 オーバーレイ、拡張オープンを含む）。DOS の内部データ構造も、当時のツールが
 辿る本物の形でメモリ上に実在する。FAT12 のフロッピーと、パーティションを
-切った FAT16 のハードディスクを同時に扱える。ただし「完全互換」にはまだ
-CONFIG.SYS・インストール可能デバイスドライバ・HMA/UMB が要る
-（[まだやっていないこと](#まだやっていないこと)）。
+切った FAT16 のハードディスクを同時に扱える。起動時には `CONFIG.SYS` を
+読み、`DEVICE=` で書かれた `.SYS` ドライバを組み込む。ただし「完全互換」には
+まだ HMA/UMB が要る（[まだやっていないこと](#まだやっていないこと)）。
 
 ```
 $ make            # イメージを作る
@@ -60,6 +60,11 @@ Segment      Size  Owner
 - **ドライブ情報**: ドライブごとの DPB を連鎖させた本物の形 (`AH=32h`)、
   List of Lists (`AH=52h`)、CDS 配列、デバイスドライバ連鎖、
   ディスクバッファ連鎖
+- **起動時の構成**: `CONFIG.SYS` の `FILES=` `BUFFERS=` `LASTDRIVE=` `SHELL=`
+  `DEVICE=` `DEVICEHIGH=` `INSTALL=` `FCBS=` `STACKS=` `BREAK=` `DOS=`
+- **インストール可能デバイスドライバ**: `.SYS` を読み込んで `INIT` を呼び、
+  連鎖に差し込む。文字デバイスは名前で開けるようになり、ブロック
+  デバイスは新しいドライブ文字として生える
 - **シェル**: `COMMAND.COM` (カーネルの一部ではなく、ただの `.COM`)、
   `AUTOEXEC.BAT` と `.BAT` の実行、`C:` によるドライブ切り替え
 
@@ -79,6 +84,7 @@ js/                 引き継ぎ元のブラウザ実装 (仕様の参照用。�
 | ファイル | 中身 |
 |---|---|
 | `dosdef.inc` | PSP / MCB / SFT / ディレクトリエントリのレイアウト、エラーコード |
+| `config.inc` | CONFIG.SYS の解析と反映、`.SYS` ドライバの読み込み |
 | `con.inc` | CON デバイス (INT 10h / 16h)、行編集 |
 | `disk.inc` | セクタ入出力。CHS (`AH=02h`/`03h`) と INT 13h 拡張 (`AH=42h`/`43h`) |
 | `drive.inc` | ドライブ表、パーティションの検出、BPB の取り込み、DPB の組み立て |
@@ -154,6 +160,54 @@ $ mdir -i build/hd.img@@32256 ::      # C: の中身 (mtools はオフセット�
 $ make check                          # 両方のイメージを fsck.fat にかける
 ```
 
+## CONFIG.SYS とデバイスドライバ
+
+DOS は起動の途中でルートディレクトリの `CONFIG.SYS` を読み、自分の形を
+決める。バッファの数もファイルハンドルの数もドライブの数も、そこで
+決まってから確定するので、順序が要る。
+
+```
+1. 既定値で一通り組み立てる   ← これが無いと CONFIG.SYS 自体が読めない
+2. CONFIG.SYS を読んで控える
+3. 数の指定を反映して組み直す (FILES= / BUFFERS= / LASTDRIVE=)
+4. DEVICE= を上から順に読み込む
+5. INSTALL= を実行する
+6. SHELL= のコマンドインタプリタを起動する
+```
+
+3 で組み直せるのは、この時点でまだ何も開いていないから。
+
+`.SYS` は実行ファイルではなく、デバイスヘッダが先頭に置かれただけの
+バイナリ。読み込んだあと `INIT` (コマンド 0) を一度呼び、ドライバが返した
+「常駐部分の末尾」までメモリを切り詰めてから、ヘッダを連鎖の先頭 (NUL の
+直後) に差し込む。名前で探すときは先頭から順に見るので、あとから入れた
+ドライバが組み込みより優先される。ANSI.SYS が CON を乗っ取れるのは
+この仕組みによる。
+
+`tests/mydev.asm` と `tests/ramdisk.asm` が、その両方の形の実物になっている。
+
+```
+DEVICE=\MYDEV.SYS hello-from-config   文字デバイス。"MYDEV" として開ける
+DEVICE=\RAMDISK.SYS                   ブロックデバイス。64KB の FAT12 が E: に
+```
+
+### 入れ子の INT 21h
+
+デバイスドライバの `INIT` は画面に何か出す。つまり `CONFIG.SYS` の処理中に
+INT 21h が呼ばれる。作業領域を 1 組しか持っていないと、内側の呼び出しが
+外側の状態を上書きして帰ってこられない。
+
+DOS はこのために作業用のスタックを何本か持っている (I/O スタック、
+ディスクスタック、補助スタック)。MYDOS も同じことをしていて、入れ子の
+深さでスタックを選び、外側のレジスタ退避領域は積んで避ける。起動処理は
+さらに別のスタックで動く。
+
+ただし本物と同じ制限も残る。ファイルシステム側の作業用変数は 1 組しか
+無いので、入れ子で安全に呼べるのは画面・キーボード・ベクタ操作
+(`AH=01h`〜`0Ch`, `25h`, `30h`, `35h`) まで。当時のデバイスドライバの
+`INIT` に許されていた範囲と同じで、`InDOS` フラグ (`AH=34h`) はそのための
+目印。
+
 ## メモリの配置
 
 ```
@@ -217,6 +271,7 @@ $ make test
   デバイス連鎖・CDS 配列・バッファ連鎖・MCB 連鎖を、当時のツールと
   同じやり方で辿る 7 項目
 - `HDTEST.COM` — ハードディスクと FAT16 の 7 項目 (下記)
+- `CFGTEST.COM` — CONFIG.SYS と `.SYS` ドライバの 6 項目 (下記)
 - `C:` / `DIR` / `A:` — シェルによるドライブ切り替え
 - `FCBTEST.COM ALPHA BETA` — FCB 系と 6.22 追加分の 15 項目
 - `DOSTEST.COM` — ハンドル系 INT 21h の 10 項目
@@ -228,6 +283,13 @@ QEMU にはフロッピー (`-fda`) と一緒に、パーティションを切�
 確かめる。最後のものは 32MB を超えた位置にデータを書いて読み返す形で見る。
 16bit で計算していると、そこへの書き込みがパーティションの先頭付近を
 壊しにいくので、読み返した内容が食い違う。
+
+起動時には `tests/config.sys` が読まれ、`CFGTEST.COM` がその結果を
+List of Lists から確かめる。数の指定 (`FILES=` / `BUFFERS=` /
+`LASTDRIVE=`) が実際の表の大きさになっていること、`DEVICE=` で入れた
+2 つのドライバが連鎖の組み込みより前にいること、文字デバイスが名前で
+開けて読み書きと IOCTL が通ること、ブロックデバイスが生やしたドライブに
+本当にファイルが作れることを見る。
 
 ```
   [PASS] PSP:5C / PSP:6C  command tail parsed into FCBs by EXEC
@@ -270,6 +332,13 @@ QEMU にはフロッピー (`-fda`) と一緒に、パーティションを切�
   [PASS] write past the 32MB mark (32-bit cluster to LBA)
   [PASS] C: and D: are usable at the same time
   [PASS] AH=32h  DPB of C: matches its BPB
+
+  [PASS] FILES=30    the SFT table really holds 30 entries
+  [PASS] BUFFERS=12  the disk buffer chain is 12 long
+  [PASS] LASTDRIVE=H is reported in the List of Lists
+  [PASS] DEVICE=     both drivers sit ahead of CON in the chain
+  [PASS] MYDEV.SYS   opens by name, reads, writes, IOCTL
+  [PASS] RAMDISK.SYS gave a usable drive with a real FAT12
 
   [PASS] .COM / .EXE の起動と .EXE のリロケーション適用
   [PASS] AH=31h 常駐終了が本当に残っている
@@ -320,9 +389,14 @@ INT 21h の面はすべて埋まり、内部データ構造 (A) とストレー�
 
 ### B. 起動時の構成
 
-- **CONFIG.SYS** — `DEVICE=` `FILES=` `BUFFERS=` `LASTDRIVE=` `SHELL=`
-  `STACKS=` `DOS=`
-- **インストール可能デバイスドライバ** (`.SYS` の読み込みとヘッダ登録)
+CONFIG.SYS とインストール可能デバイスドライバは実装済み。残っているのは
+以下。
+
+- **`STACKS=`** — 数は受け取って控えるが、割り込みごとにスタックを
+  切り替えるところまではやっていない
+- **`COUNTRY=`** — 国別情報の実体がまだ形だけ
+- **`MENUITEM=` / `MENUDEFAULT=` / `INCLUDE=`** — 6.0 で入った起動メニュー
+- **`DEVICEHIGH=`** — いまは `DEVICE=` と同じ扱い (UMB がまだ無い)
 
 ### C. メモリ
 

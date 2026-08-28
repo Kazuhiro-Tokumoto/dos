@@ -150,6 +150,7 @@ SFTH_NEXT       equ 0x00        ; dword: 次のテーブル (FFFF:FFFF = 最後)
 SFTH_COUNT      equ 0x04        ; word: このテーブルのエントリ数
 SFTH_ENTRIES    equ 0x06        ; ここから SFT が並ぶ
 SFT_ENTRIES     equ 40          ; システム全体で開けるファイル数の既定値
+MAX_SFT_ENTRIES equ 100         ; FILES= で増やせる上限
 
 ; SFT_DEVINFO のビット
 SFTI_CHAR       equ 0x8000      ; 1 = 文字デバイス, 0 = ブロック (ディスク上のファイル)
@@ -171,6 +172,7 @@ SFT_DEV_NUL     equ 2
 SFT_DEV_AUX     equ 3
 SFT_DEV_PRN     equ 4
 SFT_DEV_CLOCK   equ 5
+SFT_DEV_OTHER   equ 6            ; DEVICE= で入れた文字デバイス
 
 OPEN_READ       equ 0
 OPEN_WRITE      equ 1
@@ -409,11 +411,14 @@ DRV_MAXCLUS     equ 0x22        ; word: 存在する最大クラスタ番号 + 1
 DRV_CLUSBYTES   equ 0x24        ; word: 1 クラスタのバイト数
 DRV_SERIAL      equ 0x26        ; dword: ボリュームシリアル
 DRV_LABEL       equ 0x2A        ; 11 バイト: ボリュームラベル
-DRV_DPB         equ 0x35        ; DPB_SIZE バイト: この中に DPB を埋め込む
-DRV_ENTSIZE     equ 0x56
+DRV_DRIVER      equ 0x35        ; dword: このドライブを扱うデバイスドライバ
+DRV_UNIT        equ 0x39        ; byte: そのドライバの中でのユニット番号
+DRV_DPB         equ 0x3A        ; DPB_SIZE バイト: この中に DPB を埋め込む
+DRV_ENTSIZE     equ 0x5B
 
 DRVF_PRESENT    equ 0x01        ; 実在する
 DRVF_REMOVABLE  equ 0x02        ; メディアを入れ替えられる (フロッピー)
+DRVF_EXTERNAL   equ 0x04        ; DEVICE= で入れたドライバが扱う (INT 13h ではない)
 
 ; --- パーティションテーブル (MBR の +1BEh から 16 バイト x 4) ---------------
 PART_BOOT       equ 0x00        ; byte: 80h なら起動可能

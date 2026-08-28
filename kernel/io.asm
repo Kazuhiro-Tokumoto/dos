@@ -54,7 +54,7 @@ kernel_main:
         mov     ds, ax
         mov     es, ax
         mov     ss, ax
-        mov     sp, kernel_stack_top
+        mov     sp, boot_stack_top
         cld
         sti
 
@@ -94,6 +94,7 @@ kernel_main:
         call    cds_init
 
         ; --- ファイルハンドルの土台 ---
+        mov     al, SFT_ENTRIES
         call    sft_init
 
         ; --- List of Lists の各ポインタを実体に向ける ---
@@ -125,6 +126,34 @@ kernel_main:
         mov     ax, [boot_env_seg]
         call    build_env
 
+        ; --- カーネル自身の PSP ---
+        ; ファイルを開くにはハンドル表 (JFT) が要る。それが載るのは PSP なので、
+        ; カーネルにも 1 つ持たせる。これが無いと cur_psp が 0 のまま
+        ; ファイルを開くことになり、JFT の書き込みが 0000:0018 — 割り込み
+        ; ベクタの真ん中 — に飛ぶ。
+        mov     ax, cs
+        mov     bx, boot_psp
+        mov     cl, 4
+        shr     bx, cl
+        add     ax, bx
+        mov     [boot_psp_seg], ax
+        mov     bx, 0xA000              ; 使える上限
+        xor     cx, cx                  ; 親はいない
+        mov     dx, [boot_env_seg]
+        call    build_psp
+        mov     ax, [boot_psp_seg]
+        mov     [cur_psp], ax
+
+        ; 既定のシェルは起動したドライブから読む
+        mov     al, [cur_drive]
+        add     al, 'A'
+        mov     [shell_path], al
+
+        ; --- CONFIG.SYS ---
+        ; ここまでで既定値のまま一通り動く状態になっている。
+        ; CONFIG.SYS はその上で読み、書いてあるとおりに組み直す。
+        call    config_process
+
         ; --- COMMAND.COM を起動する ---
         jmp     start_shell
 
@@ -155,12 +184,14 @@ start_shell:
         mov     ds, ax
         mov     es, ax
         mov     ss, ax
-        mov     sp, kernel_stack_top
+        mov     sp, boot_stack_top
         cld
         sti
 
         ; 前のシェルが残していたものを片付ける
-        mov     word [cur_psp], 0
+        mov     byte [indos_flag], 0    ; ここが一番外側
+        mov     ax, [boot_psp_seg]
+        mov     [cur_psp], ax
         mov     ax, [boot_env_seg]
         mov     [exec_envseg], ax
         mov     dword [exec_psp_cmdsrc], 0
@@ -272,38 +303,147 @@ install_vectors:
 ; 切り替えてから処理に入る。プログラムのスタックをそのまま使うと、
 ; 数十バイトしかスタックを用意していない .COM で簡単に破綻する。
 ; ============================================================================
+; INT 21h の中からもう一度 INT 21h が呼ばれることがある。
+; デバイスドライバの INIT が画面に何か出すとき、常駐ソフトが割り込みの中で
+; 呼ぶときなど。作業領域を 1 組しか持っていないと、内側の呼び出しが
+; 外側の状態を上書きして帰ってこられなくなる。
+;
+; DOS はこのために作業用のスタックを何本か持っている (I/O スタック、
+; ディスクスタック、補助スタック)。ここでも同じことをする:
+; 入れ子の深さでスタックを選び、外側のレジスタ退避領域は積んで避けておく。
+;
+; ただし本物と同じ制限も残る。ファイルシステム側の作業用変数は 1 組しか
+; 無いので、入れ子で安全に呼べるのは画面・キーボード・ベクタ操作
+; (AH=01h〜0Ch, 25h, 30h, 35h) まで。当時のデバイスドライバの INIT に
+; 許されていた範囲と同じ。InDOS フラグ (AH=34h) はそのための目印。
+INT21_STACKS    equ 4                   ; 入れ子の深さの上限
+INT21_STKSIZE   equ 1024
+FRAME_SIZE      equ 24                  ; u_ax から ret_zf までの大きさ
+
 int21_handler:
         cli
-        mov     [cs:u_ax], ax
-        mov     [cs:u_ss], ss
-        mov     [cs:u_sp], sp
+        ; 呼び出し元のレジスタは、まず入口専用の場所へ置く。
+        ; 入れ子で呼ばれた場合、u_?? にはまだ外側の値が入っていて、
+        ; それを控えるまでは触れない。ここは割り込みを止めているので、
+        ; 1 組しか無くても取り合いにならない。
+        mov     [cs:.save_ax], ax
+        mov     [cs:.save_bx], bx
+        mov     [cs:.save_cx], cx
+        mov     [cs:.save_dx], dx
+        mov     [cs:.save_si], si
+        mov     [cs:.save_di], di
+        mov     [cs:.save_bp], bp
+        mov     [cs:.save_ss], ss
+        mov     [cs:.save_sp], sp
+        mov     [cs:.save_ds], ds
+        mov     [cs:.save_es], es
 
         mov     ax, cs
-        mov     ss, ax
-        mov     sp, kernel_stack_top
-
-        push    ds
-        push    es
         mov     ds, ax
         mov     es, ax
-        pop     word [u_es]
-        pop     word [u_ds]
+        cld
 
-        mov     [u_bx], bx
-        mov     [u_cx], cx
-        mov     [u_dx], dx
-        mov     [u_si], si
-        mov     [u_di], di
-        mov     [u_bp], bp
+        ; --- 入れ子なら、外側の作業領域を深さに応じた場所へ控える ---
+        mov     al, [indos_flag]
+        cmp     al, INT21_STACKS - 1
+        jae     .too_deep
+        test    al, al
+        jz      .level0
+
+        movzx   si, al
+        dec     si
+        mov     ax, FRAME_SIZE
+        mul     si
+        mov     di, frame_save
+        add     di, ax
+        mov     si, u_ax
+        mov     cx, FRAME_SIZE
+        rep     movsb
+
+.level0:
+        ; --- 深さに応じたスタックへ移る ---
+        movzx   ax, byte [indos_flag]
+        mov     cx, INT21_STKSIZE
+        mul     cx
+        mov     cx, kernel_stack_top
+        sub     cx, ax
+        mov     ax, cs
+        mov     ss, ax
+        mov     sp, cx
+        inc     byte [indos_flag]
+
+        ; --- 今回の作業領域を作る ---
+        mov     ax, [.save_ax]
+        mov     [u_ax], ax
+        mov     ax, [.save_bx]
+        mov     [u_bx], ax
+        mov     ax, [.save_cx]
+        mov     [u_cx], ax
+        mov     ax, [.save_dx]
+        mov     [u_dx], ax
+        mov     ax, [.save_si]
+        mov     [u_si], ax
+        mov     ax, [.save_di]
+        mov     [u_di], ax
+        mov     ax, [.save_bp]
+        mov     [u_bp], ax
+        mov     ax, [.save_ds]
+        mov     [u_ds], ax
+        mov     ax, [.save_es]
+        mov     [u_es], ax
+        mov     ax, [.save_ss]
+        mov     [u_ss], ax
+        mov     ax, [.save_sp]
+        mov     [u_sp], ax
 
         mov     byte [ret_cf], 0
         mov     byte [ret_zf], 0
-        mov     byte [indos_flag], 1
 
-        ; 呼び出し元が DF=1 のままでも、カーネル内は必ず前進で動かす
-        cld
+        mov     ax, [u_ax]
+        mov     bx, [u_bx]
+        mov     cx, [u_cx]
+        mov     dx, [u_dx]
+        mov     si, [u_si]
+        mov     di, [u_di]
+        mov     bp, [u_bp]
+
         sti
         jmp     int21_dispatch
+
+.too_deep:
+        ; これ以上は受けられない。いちばん内側のスタックのまま、
+        ; 機能番号が無いときと同じ返し方をする。
+        mov     ax, [.save_ax]
+        mov     [u_ax], ax
+        mov     ax, [.save_ss]
+        mov     [u_ss], ax
+        mov     ax, [.save_sp]
+        mov     [u_sp], ax
+        mov     ax, [.save_ds]
+        mov     [u_ds], ax
+        mov     ax, [.save_es]
+        mov     [u_es], ax
+        mov     ax, cs
+        mov     ss, ax
+        mov     sp, kernel_stack_top - (INT21_STACKS - 1) * INT21_STKSIZE
+        inc     byte [indos_flag]
+        mov     word [u_ax], ERR_FUNC
+        mov     byte [ret_cf], 1
+        mov     byte [ret_zf], 0
+        sti
+        jmp     int21_exit
+
+.save_ax: dw 0
+.save_bx: dw 0
+.save_cx: dw 0
+.save_dx: dw 0
+.save_si: dw 0
+.save_di: dw 0
+.save_bp: dw 0
+.save_ss: dw 0
+.save_sp: dw 0
+.save_ds: dw 0
+.save_es: dw 0
 
 ; ---------------------------------------------------------------------------
 ; INT 21h の出口
@@ -311,15 +451,46 @@ int21_handler:
 ; CF (と AH=06h の ZF) は「呼び出し元のスタックに積まれている FLAGS」を
 ; 書き換えて返す。iret がそれを復元するので、値がプログラムに届く。
 ; ---------------------------------------------------------------------------
+; ---------------------------------------------------------------------------
+; int21_exit - 呼び出し元へ返る
+;
+; 入れ子で呼ばれていた場合は、ここで外側の作業領域を書き戻す。書き戻すと
+; いまの値が読めなくなるので、先に一式を exit_frame へ写してから使う。
+; 割り込みは止めたままなので、この間に別の INT 21h が入ることはない。
+; ---------------------------------------------------------------------------
 int21_exit:
         cli
-        mov     byte [indos_flag], 0
 
-        mov     al, [ret_cf]
-        mov     ah, [ret_zf]
+        ; いまの作業領域を退避用に写す
+        push    ds
+        pop     es
+        mov     si, u_ax
+        mov     di, exit_frame
+        mov     cx, FRAME_SIZE
+        rep     movsb
 
-        mov     cx, [u_ss]
-        mov     dx, [u_sp]
+        ; 深さを 1 つ戻し、外側があればその作業領域を書き戻す
+        cmp     byte [indos_flag], 0
+        je      .no_nest
+        dec     byte [indos_flag]
+        cmp     byte [indos_flag], 0
+        je      .no_nest
+        movzx   si, byte [indos_flag]
+        dec     si
+        mov     ax, FRAME_SIZE
+        mul     si
+        mov     si, frame_save
+        add     si, ax
+        mov     di, u_ax
+        mov     cx, FRAME_SIZE
+        rep     movsb
+.no_nest:
+
+        mov     al, [exit_frame + 22]   ; ret_cf
+        mov     ah, [exit_frame + 23]   ; ret_zf
+
+        mov     cx, [exit_frame + 18]   ; u_ss
+        mov     dx, [exit_frame + 20]   ; u_sp
         mov     ss, cx
         mov     sp, dx
         mov     bp, sp                  ; [bp+4] = 呼び出し元の FLAGS
@@ -344,15 +515,15 @@ int21_exit:
         and     word [bp + 4], ~0x0040 & 0xFFFF
 
 .restore:
-        mov     ax, [u_ax]
-        mov     bx, [u_bx]
-        mov     cx, [u_cx]
-        mov     dx, [u_dx]
-        mov     si, [u_si]
-        mov     di, [u_di]
-        mov     bp, [u_bp]
-        mov     es, [u_es]
-        mov     ds, [u_ds]              ; DS は最後 (これ以降 u_?? は読めない)
+        mov     ax, [exit_frame + 0]
+        mov     bx, [exit_frame + 2]
+        mov     cx, [exit_frame + 4]
+        mov     dx, [exit_frame + 6]
+        mov     si, [exit_frame + 8]
+        mov     di, [exit_frame + 10]
+        mov     bp, [exit_frame + 12]
+        mov     es, [exit_frame + 16]
+        mov     ds, [exit_frame + 14]   ; DS は最後 (これ以降 exit_frame は読めない)
         iret
 
 ; ============================================================================
@@ -365,7 +536,7 @@ int20_handler:
         mov     ax, cs
         mov     ds, ax
         mov     ss, ax
-        mov     sp, kernel_stack_top
+        mov     sp, boot_stack_top
         cld
         sti
         mov     ax, 0x4C00
@@ -377,7 +548,7 @@ int23_handler:
         mov     ax, cs
         mov     ds, ax
         mov     ss, ax
-        mov     sp, kernel_stack_top
+        mov     sp, boot_stack_top
         cld
         sti
         mov     ax, 0x4C03
@@ -397,7 +568,7 @@ int27_handler:
         mov     ax, cs
         mov     ds, ax
         mov     ss, ax
-        mov     sp, kernel_stack_top
+        mov     sp, boot_stack_top
         cld
         sti
         mov     ax, 0x4C00
@@ -520,6 +691,7 @@ int26_handler:
 %include "dirops.inc"
 %include "exec.inc"
 %include "int21.inc"
+%include "config.inc"
 
 ; ============================================================================
 ; データ
@@ -530,8 +702,12 @@ msg_disk_fail:  db 'IO.SYS: disk initialization failed', 13, 10, 0
 msg_no_mem:     db 'IO.SYS: not enough memory', 13, 10, 0
 msg_no_shell:   db 'Bad or missing command interpreter', 13, 10, 0
 
+; 既定は起動したドライブの \COMMAND.COM。CONFIG.SYS に SHELL= が
+; 書かれていればここが差し替わる。
 shell_path:     db 'A:\COMMAND.COM', 0
+                times 68 - 16 db 0
 boot_env_seg:   dw 0
+boot_psp_seg:   dw 0
 
 ; --- INT 21h の呼び出し元レジスタ退避領域 ---------------------------------
 u_ax:           dw 0
@@ -548,6 +724,10 @@ u_sp:           dw 0
 ret_cf:         db 0
 ret_zf:         db 0                    ; 0=触らない 1=ZF を立てる 2=倒す
 
+; --- カーネル自身の PSP (段落境界に置く) -----------------------------------
+                align 16
+boot_psp:       times PSP_SIZE db 0
+
 ; --- バッファ --------------------------------------------------------------
 name83:         times 11 db 0           ; 8.3 に畳んだ作業用の名前
 dir_cur_lba:    dd 0                    ; dir_buf に載っているセクタの LBA
@@ -555,9 +735,22 @@ dir_buf:        times SECTOR_SIZE db 0
 sector_buf:     times SECTOR_SIZE db 0
 fat_buf:        times FAT_RESIDENT_SECS * SECTOR_SIZE db 0  ; 常駐 FAT (FAT12 用)
 
+; --- 入れ子の INT 21h 用に、外側の作業領域を控える場所 ---------------------
+frame_save:     times (INT21_STACKS - 1) * FRAME_SIZE db 0
+exit_frame:     times FRAME_SIZE db 0
+
 ; --- カーネルスタック ------------------------------------------------------
-; INT 21h の処理中はここを使う。プログラム側のスタックは触らない。
-                times 1024 db 0
+;
+; INT 21h の処理中に使うスタック。入れ子の深さぶんだけ並べてあり、
+; いちばん外側が一番上を使う。プログラム側のスタックは触らない。
+                times INT21_STACKS * INT21_STKSIZE db 0
 kernel_stack_top:
+
+; 起動処理とシェルの起動に使うスタック。INT 21h のものとは別にしてある。
+; CONFIG.SYS の処理中にデバイスドライバの INIT が INT 21h を呼ぶと、
+; 同じスタックだと外側 (CONFIG.SYS の処理) の足元を崩してしまう。
+; DOS が I/O スタックとディスクスタックを分けているのと同じ理由。
+                times 1024 db 0
+boot_stack_top:
 
 kernel_end:
