@@ -38,7 +38,7 @@ SHELL_COM := $(BUILD)/command.com
 PROGS := $(BUILD)/hello.com $(BUILD)/hello.exe $(BUILD)/dostest.com \
          $(BUILD)/fcbtest.com $(BUILD)/tsrtest.com $(BUILD)/ovltest.com \
          $(BUILD)/dosint.com $(BUILD)/hdtest.com $(BUILD)/cfgtest.com \
-         $(BUILD)/instest.com $(BUILD)/xmstest.com \
+         $(BUILD)/instest.com $(BUILD)/xmstest.com $(BUILD)/envtest.com \
          $(BUILD)/ovl.ovl $(BUILD)/mydev.sys $(BUILD)/ramdisk.sys
 
 KDEPS := kernel/io.asm $(wildcard $(INCDIR)/*.inc)
@@ -107,6 +107,7 @@ define make_image
 	$(MCOPY) -i $(1) -o $(BUILD)/cfgtest.com ::CFGTEST.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/instest.com ::INSTEST.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/xmstest.com ::XMSTEST.COM
+	$(MCOPY) -i $(1) -o $(BUILD)/envtest.com ::ENVTEST.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/mydev.sys ::MYDEV.SYS
 	$(MCOPY) -i $(1) -o $(BUILD)/ramdisk.sys ::RAMDISK.SYS
 	$(MCOPY) -i $(1) -o tests/config.sys ::CONFIG.SYS
@@ -130,9 +131,16 @@ $(IMG_DBG): $(KERNEL_DBG) $(IMGDEPS) tests/autoexec-test.bat
 # 中身は毎回作り直す (テストがファイルを書くため)。
 hd: $(HDIMG)
 
-$(HDIMG): tools/mkhd.py | $(BUILD)
+# C: にもテストプログラムを置く。ENVTEST は「起動したドライブが
+# argv[0] に出るか」を見るので、A: と C: の両方から走らせる必要がある。
+define hd_populate
+	$(MCOPY) -i $(1)@@32256 -o $(BUILD)/envtest.com ::ENVTEST.COM
+endef
+
+$(HDIMG): tools/mkhd.py $(BUILD)/envtest.com | $(BUILD)
 	rm -f $@
 	$(PYTHON) tools/mkhd.py $@
+	$(call hd_populate,$@)
 
 # --- 実行 -------------------------------------------------------------------
 run: $(IMG) $(HDIMG)
@@ -144,9 +152,10 @@ debug: $(IMG_DBG) $(HDIMG)
 # --- 自動テスト -------------------------------------------------------------
 # ハードディスクのイメージは毎回作り直す。前の実行が書いたファイルが
 # 残っていると「作れるか」の確認にならないため。
-test: $(IMG_DBG)
+test: $(IMG_DBG) $(BUILD)/envtest.com
 	rm -f $(HDIMG)
 	$(PYTHON) tools/mkhd.py $(HDIMG)
+	$(call hd_populate,$(HDIMG))
 	$(PYTHON) tools/runtest.py $(IMG_DBG) --hd $(HDIMG)
 
 # 参照実装 (js/) の回帰テスト。node があるときだけ動く。

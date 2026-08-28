@@ -118,6 +118,15 @@ disk_xfer:
         pop     eax
         jc      .fail
 
+        ; DEVICE= で入れたブロックドライバが持つドライブは、BIOS の
+        ; INT 13h では読めない。ここで振り分けずに下へ落ちると、
+        ; ドライバのユニット番号がそのまま BIOS のドライブ番号として
+        ; 使われてしまう。ユニット 0 のラムディスクなら「BIOS の 0 番」=
+        ; 起動フロッピーになり、相手のセクタ 1 (= このディスクでは
+        ; Stage2 の置き場所) を書き潰す。
+        test    byte [di + DRV_FLAGS], DRVF_EXTERNAL
+        jnz     .external
+
         add     eax, [di + DRV_PARTLBA]
         mov     [.lba], eax
         mov     [.count], cx
@@ -153,6 +162,13 @@ disk_xfer:
         dec     word [.count]
         jmp     .loop
 .done:
+        pop     es
+        popad
+        clc
+        ret
+.external:
+        call    drive_dev_xfer
+        jc      .fail
         pop     es
         popad
         clc

@@ -40,9 +40,10 @@ REQUIRED = [
      "CONFIG.SYS の INSTALL= がプログラムを引数付きで実行する"),
 ]
 
-# XMSTEST / CFGTEST / HDTEST / DOSINT / FCBTEST / DOSTEST の 6 本が、
-# それぞれ集計行と終了の目印を出す。
-EXPECTED_SUITES = 6
+# XMSTEST / CFGTEST / HDTEST / DOSINT / FCBTEST / DOSTEST / ENVTEST の
+# 7 本が、それぞれ集計行と終了の目印を出す。ENVTEST は A: と C: の
+# 両方から走らせるので、集計行は 8 本ぶん出る。
+EXPECTED_SUITES = 8
 
 
 def run(image, timeout, qemu, keep_log, hd):

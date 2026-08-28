@@ -226,6 +226,176 @@ build_env:
         pop     ax
         ret
 
+; ---------------------------------------------------------------------------
+; exec_save_fullpath - path_buf を正規化して exec_fullpath に控える
+;
+; path_buf には copy_path が入れた「呼び出し側が指定したパス」が入って
+; いる。相対パスやドライブ省略のこともあるので、truename で
+; "C:\SUB\PROG.EXE" の形に開いてから覚える。
+; ---------------------------------------------------------------------------
+exec_save_fullpath:
+        push    ax
+        push    cx
+        push    si
+        push    di
+        push    es
+        push    ds
+        pop     es
+
+        call    truename                ; path_buf -> path_buf2
+        mov     si, path_buf2
+        mov     di, exec_fullpath
+        mov     cx, 127
+.copy:
+        lodsb
+        stosb
+        test    al, al
+        jz      .done
+        loop    .copy
+        xor     al, al
+        stosb
+.done:
+        pop     es
+        pop     di
+        pop     si
+        pop     cx
+        pop     ax
+        ret
+
+; ---------------------------------------------------------------------------
+; env_make_child - 子プロセス用の環境ブロックを作る
+;   入力: DX = 元にする環境ブロックのセグメント (0 なら中身なし)
+;         AX = 子の PSP セグメント (確保したブロックの持ち主にする)
+;   出力: DX = 新しい環境ブロックのセグメント
+;
+; DOS は親の環境をそのまま子に渡さない。子ごとに写しを作り、終わりの
+; 二重 0 のあとに word 1 と「起動したプログラムのフルパス」を置く。
+; C の argv[0] はここから来るし、DOS エクステンダのように自分の EXE を
+; 開き直す種類のプログラムは、この文字列だけを頼りに自分を探す。
+; 親のものを使い回すと、子は親のパスを自分のパスだと思い込む。
+;
+; 作れなかったときは入力の DX をそのまま返す (起動自体は続ける)。
+; ---------------------------------------------------------------------------
+env_make_child:
+        mov     byte [cs:env_child_made], 0
+        push    ax
+        push    bx
+        push    cx
+        push    si
+        push    di
+        push    es
+        push    ds
+
+        mov     [.psp], ax
+        mov     [.src], dx
+
+        ; --- 元の環境の長さを測る (二重 0 まで) ---
+        xor     si, si
+        test    dx, dx
+        jz      .measured
+        mov     ds, dx
+.scan:
+        cmp     si, 0x7FF0              ; 壊れていても暴走しないように
+        jae     .measured
+        cmp     byte [si], 0
+        je      .scan_end
+.scan_str:
+        inc     si
+        cmp     byte [si], 0
+        jne     .scan_str
+        inc     si                      ; 文字列の終端 0 を飛ばす
+        jmp     .scan
+.scan_end:
+        inc     si                      ; 全体の終わりを示す 0 も含める
+.measured:
+        push    cs
+        pop     ds
+        mov     [.envlen], si
+
+        ; --- フルパスの長さ ---
+        mov     di, exec_fullpath
+        xor     cx, cx
+.plen:
+        cmp     byte [di], 0
+        je      .plen_done
+        inc     di
+        inc     cx
+        jmp     .plen
+.plen_done:
+        inc     cx                      ; 終端の 0
+        mov     [.pathlen], cx
+
+        ; --- 必要なパラグラフ数 ---
+        mov     ax, [.envlen]
+        add     ax, 2                   ; word 1
+        add     ax, cx
+        add     ax, 15
+        shr     ax, 4
+        mov     bx, ax
+        call    mem_alloc
+        jc      .give_up
+        mov     [.dst], ax
+        mov     byte [env_child_made], 1
+
+        ; 持ち主。ここで 0 を入れてはいけない。MCB の所有者 0 は「空き」を
+        ; 意味するので、すぐあとに来るプログラム本体の確保がこのブロックを
+        ; 空きとみなして掴み、作ったばかりの環境を上書きしてしまう。
+        ; PSP はまだ無いので、mem_alloc が入れた仮の持ち主 (0xFFFF) を
+        ; そのまま残し、.make_psp で本物に入れ替える。
+        cmp     word [.psp], 0
+        je      .owner_later
+        mov     bx, ax
+        dec     bx
+        mov     es, bx
+        mov     bx, [.psp]
+        mov     [es:MCB_OWNER], bx
+.owner_later:
+
+        ; --- 元の環境を写す ---
+        mov     es, ax
+        xor     di, di
+        mov     cx, [.envlen]
+        jcxz    .no_src
+        mov     ds, [.src]
+        xor     si, si
+        rep     movsb
+.no_src:
+        push    cs
+        pop     ds
+
+        ; --- word 1 とフルパス ---
+        mov     ax, 1
+        stosw
+        mov     si, exec_fullpath
+        mov     cx, [.pathlen]
+        rep     movsb
+
+        mov     dx, [.dst]
+        jmp     .out
+.give_up:
+        mov     dx, [.src]
+.out:
+        pop     ds
+        pop     es
+        pop     di
+        pop     si
+        pop     cx
+        pop     bx
+        pop     ax
+        ret
+.psp:      dw 0
+.src:      dw 0
+.dst:      dw 0
+.envlen:   dw 0
+.pathlen:  dw 0
+
+; 起動しようとしているプログラムの正規化したフルパス。
+exec_fullpath:  times 128 db 0
+
+; 子に渡す環境ブロック。プログラム本体より先に確保する。
+exec_child_env: dw 0
+env_child_made: db 0            ; 1 なら env_make_child が確保した
+
 env_template:
         db 'COMSPEC=A:\COMMAND.COM', 0
         db 'PATH=A:\', 0
@@ -316,6 +486,28 @@ prog_load:
         push    dx
         push    di
         push    es
+
+        ; 子に渡すフルパスを、path_buf がまだ残っているうちに控える。
+        call    exec_save_fullpath
+
+        ; --- 環境ブロックを先に作る ---
+        ;
+        ; .COM は空きの一番大きいブロックを丸ごと取るし、.EXE も
+        ; maxalloc=FFFF なら同じことをする。本体を置いたあとでは
+        ; 環境ブロックのぶんが残らないので、順番はここでなければならない。
+        push    dx                      ; DS:DX = パス。file_open がまだ使う
+        mov     dx, [exec_envseg]
+        test    dx, dx
+        jnz     .env_src_ok
+        push    es
+        mov     es, [cur_psp]
+        mov     dx, [es:PSP_ENVSEG]
+        pop     es
+.env_src_ok:
+        xor     ax, ax                  ; 持ち主は PSP ができてから入れる
+        call    env_make_child
+        mov     [exec_child_env], dx
+        pop     dx
 
         ; --- ファイルを開く ---
         xor     al, al                  ; 読み取り専用
@@ -616,12 +808,17 @@ prog_load:
         push    si
         push    es
 
-        ; 環境ブロック: 指定がなければ親のものを引き継ぐ
-        mov     dx, [exec_envseg]
-        test    dx, dx
-        jnz     .env_ok
-        mov     es, [cur_psp]
-        mov     dx, [es:PSP_ENVSEG]
+        ; 環境ブロックは prog_load の入口で作ってある。ここでは持ち主を
+        ; 子の PSP にするだけ。入れておかないと、子が終わっても
+        ; mem_free_owner が拾えず、起動のたびにメモリが減っていく。
+        mov     dx, [exec_child_env]
+        cmp     byte [env_child_made], 0
+        je      .env_ok
+        mov     bx, dx
+        dec     bx
+        mov     es, bx
+        mov     bx, [.psp]
+        mov     [es:MCB_OWNER], bx
 .env_ok:
 
         mov     ax, [.psp]

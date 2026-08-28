@@ -1589,15 +1589,23 @@ truename:
         mov     si, path_buf
         mov     di, path_buf2
 
-        ; ドライブ名。指定があってもいまは A: しかない
-        mov     al, 'A'
+        ; ドライブ名。"X:" が付いていればそれ、無ければカレントドライブ。
+        ; ここを 'A' 固定にしていると、C: に置いたプログラムのフルパスが
+        ; A: のものとして子に渡る。自分の EXE を開き直す型のプログラム
+        ; (DOS エクステンダなど) が見当違いのファイルを掴むことになる。
+        mov     al, [cur_drive]
+        cmp     byte [si + 1], ':'
+        jne     .no_drive
+        mov     al, [si]
+        call    to_upper
+        sub     al, 'A'
+        add     si, 2
+.no_drive:
+        mov     [.drive], al
+        add     al, 'A'
         stosb
         mov     al, ':'
         stosb
-        cmp     byte [si + 1], ':'
-        jne     .no_drive
-        add     si, 2
-.no_drive:
 
         ; 絶対パスならルートから、そうでなければカレントディレクトリから
         mov     al, [si]
@@ -1606,11 +1614,19 @@ truename:
         cmp     al, '/'
         je      .from_root
 
-        ; カレントディレクトリを土台にする
+        ; カレントディレクトリを土台にする。カレントドライブとは限らない
+        ; ("C:FOO.TXT" のような書き方) ので、作業用の cur_dir_path では
+        ; なく、そのドライブの CDS から引く。
         push    si
-        mov     si, cur_dir_path
+        push    di
+        mov     al, [.drive]
+        call    cds_addr                ; DI = そのドライブの CDS
+        mov     si, di
+        pop     di
+        jc      .cur_done               ; 無効なドライブ → ルート扱い
+        add     si, CDS_PATH + 3        ; "X:\" の 3 文字を飛ばす
         cmp     byte [si], 0
-        je      .cur_is_root
+        je      .cur_done
         mov     al, '\'
         stosb
 .cur_copy:
@@ -1619,7 +1635,6 @@ truename:
         jz      .cur_done
         stosb
         jmp     .cur_copy
-.cur_is_root:
 .cur_done:
         pop     si
         jmp     .walk
@@ -1697,7 +1712,7 @@ truename:
         jmp     .copy_comp
 
 .finish:
-        ; ルートだけなら "A:\" にする
+        ; ルートだけなら "X:\" にする
         cmp     di, path_buf2 + 2
         jne     .terminate
         mov     al, '\'
@@ -1712,6 +1727,7 @@ truename:
         pop     cx
         pop     ax
         ret
+.drive:  db 0
 
 ; ===========================================================================
 ; 65h - 拡張された国別情報
