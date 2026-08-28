@@ -374,6 +374,26 @@ xms_int2f:
 ;   AH = 機能番号。返り値は機能ごと。AX=0 が失敗で、そのとき BL にエラー。
 ; ---------------------------------------------------------------------------
 xms_entry:
+%ifdef XMS_TRACE
+        pushf
+        pusha
+        push    ds
+        mov     bl, ah                  ; 機能番号を控える
+        push    cs
+        pop     ds
+        mov     al, 'X'
+        call    serial_putc_dbg
+        mov     al, bl
+        shr     al, 4
+        call    hexd_dbg
+        mov     al, bl
+        call    hexd_dbg
+        mov     al, ' '
+        call    serial_putc_dbg
+        pop     ds
+        popa
+        popf
+%endif
         cmp     ah, 0x00
         je      xms_f00
         cmp     ah, 0x01
@@ -412,6 +432,12 @@ xms_entry:
         je      xms_f11
         cmp     ah, 0x88
         je      xms_f88
+        cmp     ah, 0x89
+        je      xms_f89
+        cmp     ah, 0x8E
+        je      xms_f8E
+        cmp     ah, 0x8F
+        je      xms_f8F
         ; 知らない機能
         xor     ax, ax
         mov     bl, XMSE_NOTIMPL
@@ -836,6 +862,171 @@ xms_f88:
         xor     bl, bl
         retf
 
+; --- 89h: 拡張メモリを確保する (32bit 版) ---
+;   EDX = 欲しい KB → DX = ハンドル
+;
+; 09h の 32bit 版。16bit の DX では 64MB までしか頼めないので、XMS 3.0 で
+; 足された。DJGPP の DPMI ホスト (CWSDPMI) はこちらしか呼ばない。
+; 実装していないと「確保できなかった」ではなく「そんな機能はない」が
+; 返り、呼び出し側がそれを見落とすと、掴んでもいないメモリを自分の
+; ものとして配り始める。実際 CWSDPMI は物理 0 番地から配り出して、
+; DOS のカーネルを上書きした。
+xms_f89:
+        push    ecx
+        push    si
+        push    di
+
+        mov     ecx, edx                ; ECX = 欲しい KB
+        test    ecx, ecx
+        jz      .zero
+
+        call    xms_free_kb             ; EAX = 空き KB
+        cmp     eax, ecx
+        jb      .no_mem
+
+        call    xms_handle_alloc
+        jc      .no_handles
+
+        mov     eax, [cs:xms_next]
+        mov     [cs:si + XH_BASE], eax
+        mov     [cs:si + XH_SIZE], ecx
+        mov     byte [cs:si + XH_USED], 1
+        mov     byte [cs:si + XH_LOCKS], 0
+
+        mov     eax, ecx
+        shl     eax, 10                 ; KB → バイト
+        add     [cs:xms_next], eax
+
+        mov     dx, di                  ; DI = ハンドル番号
+        mov     ax, 1
+        xor     bl, bl
+        pop     di
+        pop     si
+        pop     ecx
+        retf
+.zero:
+        xor     ax, ax
+        mov     bl, XMSE_BADLENGTH
+        pop     di
+        pop     si
+        pop     ecx
+        retf
+.no_mem:
+        xor     ax, ax
+        mov     bl, XMSE_NOMEMLEFT
+        pop     di
+        pop     si
+        pop     ecx
+        retf
+.no_handles:
+        xor     ax, ax
+        mov     bl, XMSE_NOHANDLES
+        pop     di
+        pop     si
+        pop     ecx
+        retf
+
+; --- 8Eh: ハンドルの情報を返す (32bit 版) ---
+;   DX = ハンドル → BH = ロック回数, BL = 空きハンドル数, EDX = 大きさ KB
+xms_f8E:
+        push    si
+        mov     ax, dx
+        call    xms_handle_addr
+        jc      .bad
+        mov     bh, [cs:si + XH_LOCKS]
+        push    bx
+        call    xms_handle_free_count   ; AL = 空きハンドル数
+        mov     ah, al
+        pop     bx
+        mov     bl, ah
+        mov     edx, [cs:si + XH_SIZE]
+        mov     ax, 1
+        pop     si
+        retf
+.bad:
+        xor     ax, ax
+        mov     bl, XMSE_BADHANDLE
+        pop     si
+        retf
+
+; --- 8Fh: 確保した大きさを変える (32bit 版) ---
+;   EBX = 新しい大きさ KB, DX = ハンドル
+;
+; 09h/89h の割り当ては後ろへ伸ばすだけなので、縮めるのは常にでき、
+; 伸ばせるのは「いちばん後ろに取ったブロック」のときだけ。
+xms_f8F:
+        push    ecx
+        push    edx
+        push    si
+
+        mov     ax, dx
+        call    xms_handle_addr
+        jc      .bad
+
+        mov     ecx, [cs:si + XH_SIZE]
+        cmp     ebx, ecx
+        je      .done                   ; 変わらない
+        jb      .shrink
+
+        ; 伸ばす: このブロックが末尾でなければ動かせない
+        mov     eax, [cs:si + XH_BASE]
+        mov     edx, ecx
+        shl     edx, 10
+        add     eax, edx
+        cmp     eax, [cs:xms_next]
+        jne     .no_mem
+
+        mov     eax, ebx
+        sub     eax, ecx                ; 増やす KB
+        push    eax
+        call    xms_free_kb
+        pop     edx
+        cmp     eax, edx
+        jb      .no_mem
+        mov     eax, edx
+        shl     eax, 10
+        add     [cs:xms_next], eax
+        mov     [cs:si + XH_SIZE], ebx
+        jmp     .done
+
+.shrink:
+        mov     eax, ecx
+        sub     eax, ebx
+        shl     eax, 10
+        ; 末尾なら本当に返す
+        push    eax
+        mov     eax, [cs:si + XH_BASE]
+        mov     edx, ecx
+        shl     edx, 10
+        add     eax, edx
+        cmp     eax, [cs:xms_next]
+        pop     eax
+        jne     .just_note
+        sub     [cs:xms_next], eax
+.just_note:
+        mov     [cs:si + XH_SIZE], ebx
+.done:
+        mov     ax, 1
+        xor     bl, bl
+        pop     si
+        pop     edx
+        pop     ecx
+        retf
+.no_mem:
+        xor     ax, ax
+        mov     bl, XMSE_NOMEMLEFT
+        pop     si
+        pop     edx
+        pop     ecx
+        retf
+.bad:
+        xor     ax, ax
+        mov     bl, XMSE_BADHANDLE
+        pop     si
+        pop     edx
+        pop     ecx
+        retf
+
 ; ============================================================================
 ; 中で使う道具
 ; ============================================================================
@@ -1102,3 +1293,33 @@ xms_move_src:   dd 0
 xms_move_dst:   dd 0
 xms_move_len:   dd 0
 xms_handles:    times XMS_MAX_HANDLES * XH_ENTSIZE db 0
+
+%ifdef XMS_TRACE
+; --- 追跡用のシリアル出力 (XMS_TRACE を定義したときだけ) ---
+serial_putc_dbg:
+        push    ax
+        push    dx
+        mov     ah, al
+.wait:
+        mov     dx, 0x3FD
+        in      al, dx
+        test    al, 0x20
+        jz      .wait
+        mov     dx, 0x3F8
+        mov     al, ah
+        out     dx, al
+        pop     dx
+        pop     ax
+        ret
+
+hexd_dbg:
+        push    ax
+        and     al, 0x0F
+        cmp     al, 10
+        jb      .d
+        add     al, 'A' - 10 - '0'
+.d:     add     al, '0'
+        call    serial_putc_dbg
+        pop     ax
+        ret
+%endif

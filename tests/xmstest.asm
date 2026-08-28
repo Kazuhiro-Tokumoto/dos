@@ -40,6 +40,7 @@ start:
         call    t_info
         call    t_free
         call    t_int2f
+        call    t_xms3
 
         call    newline
         mov     si, msg_result
@@ -445,6 +446,91 @@ t_int2f:
         jmp     pass
 
 ; ============================================================================
+; 10. XMS 3.0 の 32bit 系 (88h / 89h / 8Eh / 8Fh)
+;
+; 16bit の 09h では DX が KB 数なので 64MB までしか頼めない。XMS 3.0 は
+; EDX を使う 89h を足した。いまの DPMI ホスト (DJGPP の CWSDPMI など) は
+; こちらしか呼ばない。
+;
+; 実装していないと「確保できなかった」ではなく「そんな機能はない」が
+; 返る。呼び出し側がそれを見落とすと、掴んでもいないメモリを自分のもの
+; として配り始める。実際 CWSDPMI は物理 0 番地から配り出して、DOS の
+; カーネルを上書きした。
+; ============================================================================
+t_xms3:
+        mov     si, n_xms3
+        call    begin
+
+        ; 88h: 空きを 32bit で問い合わせる
+        mov     byte [step], 1
+        mov     ah, 0x88
+        call    far [xms_off]
+        test    eax, eax
+        jz      failx                   ; 空きが 0 はおかしい
+        mov     [.free_kb], eax
+
+        ; 89h: 32bit で 128KB 確保する
+        mov     byte [step], 2
+        mov     ah, 0x89
+        mov     edx, 128
+        call    far [xms_off]
+        test    ax, ax
+        jz      failx
+        mov     [.handle], dx
+
+        ; 8Eh: 大きさを問い合わせる
+        mov     byte [step], 3
+        mov     ah, 0x8E
+        mov     dx, [.handle]
+        call    far [xms_off]
+        test    ax, ax
+        jz      failx
+        cmp     edx, 128
+        jne     failx
+
+        ; 8Fh: 64KB に縮める
+        mov     byte [step], 4
+        mov     ah, 0x8F
+        mov     ebx, 64
+        mov     dx, [.handle]
+        call    far [xms_off]
+        test    ax, ax
+        jz      failx
+
+        mov     byte [step], 5
+        mov     ah, 0x8E
+        mov     dx, [.handle]
+        call    far [xms_off]
+        test    ax, ax
+        jz      failx
+        cmp     edx, 64
+        jne     failx
+
+        ; 0Ch: 物理アドレスが 1MB より上を指していること
+        mov     byte [step], 6
+        mov     ah, 0x0C
+        mov     dx, [.handle]
+        call    far [xms_off]
+        test    ax, ax
+        jz      failx
+        test    dx, dx
+        jz      failx                   ; 上位が 0 = 1MB より下
+
+        mov     ah, 0x0D
+        mov     dx, [.handle]
+        call    far [xms_off]
+
+        mov     byte [step], 7
+        mov     ah, 0x0A
+        mov     dx, [.handle]
+        call    far [xms_off]
+        test    ax, ax
+        jz      failx
+        jmp     pass
+.free_kb: dd 0
+.handle:  dw 0
+
+; ============================================================================
 ; 出力まわり
 ; ============================================================================
 begin:
@@ -574,6 +660,7 @@ n_move:      db 'XMS 0Bh  copy up past 1MB and back, byte for byte', 0
 n_info:      db 'XMS 0Ch/0Dh/0Eh/0Fh  lock, query and shrink', 0
 n_free:      db 'XMS 0Ah  the handle is gone after freeing it', 0
 n_int2f:     db 'INT 2Fh  an unknown function leaves the registers alone', 0
+n_xms3:      db 'XMS 88h/89h/8Eh/8Fh  the 32-bit calls a DPMI host uses', 0
 
 ; --- 変数 ------------------------------------------------------------------
 test_name:   dw 0
