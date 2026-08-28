@@ -28,6 +28,7 @@ TYPE README.TXT | PIPETEST
 PIPETEST < README.TXT
 DEL DIRLIST.TXT
 LFNTEST
+EMSTEST
 XMSTEST
 REM XMS のブロック転送でアンリアルモードに出入りしたあと、
 REM ハードディスクを触れるかどうか。ここで転ぶと再起動していた。

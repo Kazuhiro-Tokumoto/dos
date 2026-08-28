@@ -40,7 +40,9 @@ PROGS := $(BUILD)/hello.com $(BUILD)/hello.exe $(BUILD)/dostest.com \
          $(BUILD)/dosint.com $(BUILD)/hdtest.com $(BUILD)/cfgtest.com \
          $(BUILD)/instest.com $(BUILD)/xmstest.com $(BUILD)/envtest.com \
          $(BUILD)/lfntest.com $(BUILD)/pipetest.com \
-         $(BUILD)/ovl.ovl $(BUILD)/mydev.sys $(BUILD)/ramdisk.sys
+         $(BUILD)/emstest.com \
+         $(BUILD)/ovl.ovl $(BUILD)/mydev.sys $(BUILD)/ramdisk.sys \
+         $(BUILD)/emm386.sys
 
 KDEPS := kernel/io.asm $(wildcard $(INCDIR)/*.inc)
 
@@ -82,6 +84,10 @@ $(BUILD)/hello.exe: tests/hellox.asm tools/mkexe.py | $(BUILD)
 $(BUILD)/%.sys: tests/%.asm | $(BUILD)
 	$(NASM) $(NASMFLAGS) $< -o $@
 
+# 実用のドライバ。EMM386.SYS は EMS (INT 67h) を提供する。
+$(BUILD)/%.sys: drivers/%.asm | $(BUILD)
+	$(NASM) $(NASMFLAGS) $< -o $@
+
 # オーバーレイも MZ 形式。AH=4Bh AL=3 はリロケーションだけを当てる。
 $(BUILD)/ovl.ovl: tests/ovlbody.asm tools/mkexe.py | $(BUILD)
 	$(NASM) $(NASMFLAGS) tests/ovlbody.asm -o $(BUILD)/ovlbody.bin
@@ -113,6 +119,8 @@ define make_image
 	$(MCOPY) -i $(1) -o $(BUILD)/pipetest.com ::PIPETEST.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/mydev.sys ::MYDEV.SYS
 	$(MCOPY) -i $(1) -o $(BUILD)/ramdisk.sys ::RAMDISK.SYS
+	$(MCOPY) -i $(1) -o $(BUILD)/emm386.sys ::EMM386.SYS
+	$(MCOPY) -i $(1) -o $(BUILD)/emstest.com ::EMSTEST.COM
 	$(MCOPY) -i $(1) -o tests/config.sys ::CONFIG.SYS
 	$(MCOPY) -i $(1) -o $(BUILD)/ovl.ovl ::OVL.OVL
 	$(MCOPY) -i $(1) -o tests/readme.txt ::README.TXT

@@ -42,12 +42,13 @@ REQUIRED = [
     ("tail-line", "COMMAND.COM の >> による追記"),
     ("PIPE-GOT: MYDOS", "COMMAND.COM の | と < でハンドルが差し替わる"),
     ("after XMS block move", "XMS のブロック転送のあとでもハードディスクを触れる"),
+    ("EMM386.SYS installed", "CONFIG.SYS の DEVICE= が EMS ドライバを組み込む"),
 ]
 
 # XMSTEST / CFGTEST / HDTEST / DOSINT / FCBTEST / DOSTEST / ENVTEST の
 # LFNTEST を加えた 8 本が、それぞれ集計行と終了の目印を出す。
 # ENVTEST は A: と C: の両方から走らせるので、集計行は 9 本ぶん出る。
-EXPECTED_SUITES = 9
+EXPECTED_SUITES = 10
 
 
 def run(image, timeout, qemu, keep_log, hd):
