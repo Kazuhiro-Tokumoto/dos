@@ -95,7 +95,7 @@ dir_mkdir:
 
         ; --- 親ディレクトリにエントリを作る ---
         mov     ax, [.parent]
-        call    dir_alloc_entry
+        call    dir_alloc_named         ; 長い名前なら断片も一緒に確保する
         jc      .full_dir
 
         push    si
@@ -185,6 +185,7 @@ dir_rmdir:
 
         call    path_resolve
         jc      .no_path
+        mov     [.pardir], ax           ; 親ディレクトリ (断片の片付けに使う)
 
         push    si
         mov     si, name83
@@ -216,6 +217,10 @@ dir_rmdir:
         mov     byte [di + DIR_NAME], DIR_FREE
         call    dir_store
         jc      .io_error
+
+        ; 手前に並んでいた長い名前の断片を片付ける
+        mov     ax, [.pardir]
+        call    dir_purge_lfn
 
         mov     ax, [.target]
         call    fat_free_chain
@@ -288,6 +293,7 @@ dir_rmdir:
         pop     cx
         pop     bx
         ret
+.pardir:   dw 0
 .target:   dw 0
 
 ; ---------------------------------------------------------------------------
@@ -614,6 +620,10 @@ dir_rename:
         call    dir_store
         jc      .io_error
 
+        ; 元の場所に残った断片を片付ける
+        mov     ax, [.srcdir]
+        call    dir_purge_lfn
+
         xor     ax, ax
         clc
         jmp     .out
@@ -669,6 +679,10 @@ find_first:
         call    path_resolve
         jc      .no_path
         mov     [.dirclus], ax
+
+        ; 畳む前のつづりを控えておく。長い名前での検索 (AX=714Eh) は
+        ; 8.3 のパターンでは拾えないので、こちらで照合する。
+        call    find_save_long_pattern
 
         ; DTA に検索状態を書き込む
         mov     es, [dta_seg]
@@ -774,11 +788,29 @@ find_next:
         cmp     al, DIR_END
         je      .no_more
         cmp     al, DIR_FREE
-        je      .loop
+        je      .skip_entry
 
         mov     al, [si + DIR_ATTR]
         cmp     al, ATTR_LFN
-        je      .loop
+        jne     .not_frag
+
+        ; 長い名前の断片。組み立てに足して次へ。
+        push    di
+        push    es
+        push    ds
+        pop     es
+        mov     di, si
+        call    lfn_take
+        pop     es
+        pop     di
+        jmp     .loop
+
+.skip_entry:
+        ; 本体のエントリを 1 つ跨いだので、組み立て中のものは捨てる
+        call    lfn_reset
+        jmp     .loop
+
+.not_frag:
 
         ; 属性の絞り込み。隠し/システム/ディレクトリは、検索属性で
         ; 明示的に求められたときだけ返す。ボリュームラベルも同様。
@@ -786,25 +818,28 @@ find_next:
         test    al, ATTR_DIRECTORY
         jz      .not_dir
         test    ah, ATTR_DIRECTORY
-        jz      .loop
+        jz      .skip_entry
 .not_dir:
         test    al, ATTR_VOLUME
         jz      .not_vol
         test    ah, ATTR_VOLUME
-        jz      .loop
+        jz      .skip_entry
 .not_vol:
         test    al, ATTR_HIDDEN
         jz      .not_hidden
         test    ah, ATTR_HIDDEN
-        jz      .loop
+        jz      .skip_entry
 .not_hidden:
         test    al, ATTR_SYSTEM
         jz      .not_sys
         test    ah, ATTR_SYSTEM
-        jz      .loop
+        jz      .skip_entry
 .not_sys:
 
         ; 名前がパターンに一致するか
+        cmp     byte [find_long_mode], 0
+        jne     .match_long
+
         push    si
         push    di
         push    es
@@ -816,7 +851,20 @@ find_next:
         pop     es
         pop     di
         pop     si
-        jne     .loop
+        jne     .skip_entry
+        jmp     .matched
+
+.match_long:
+        ; 長い名前での検索 (AX=714Eh)。8.3 に畳んだパターンでは
+        ; "a very long name.data" のようなものが拾えないので、
+        ; 畳む前のつづりでワイルドカード照合する。
+        call    lfn_capture             ; find_longname に表向きの名前
+        push    si
+        mov     si, find_pattern_long
+        call    lfn_wild_match
+        pop     si
+        jne     .skip_entry
+.matched:
 
         ; --- 見つかった。DTA に結果を書く ---
         mov     di, [.dta]
@@ -837,6 +885,10 @@ find_next:
         ; 8.3 を "NAME.EXT" に開いて入れる
         add     di, FIND_NAME
         call    name_from_83
+
+        ; 長い名前を控えておく。DTA の形は DOS が決めていて広げられないので、
+        ; 別に持っておき、AX=714Eh/714Fh (長い名前の検索) から返す。
+        call    lfn_capture
 
         xor     ax, ax
         clc

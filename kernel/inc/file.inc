@@ -669,7 +669,7 @@ file_create:
 
 .make_new:
         mov     ax, [.dirclus]
-        call    dir_alloc_entry
+        call    dir_alloc_named         ; 長い名前なら断片も一緒に確保する
         jc      .disk_full
 
         ; 名前を書き込む
@@ -1491,6 +1491,7 @@ file_delete:
 
         call    path_resolve
         jc      .no_path
+        mov     [.dirclus], ax          ; 親ディレクトリ (断片の片付けに使う)
 
         push    si
         mov     si, name83
@@ -1512,6 +1513,11 @@ file_delete:
         mov     byte [di + DIR_NAME], DIR_FREE
         call    dir_store
         jc      .io_error
+
+        ; 手前に並んでいた長い名前の断片を片付ける
+        mov     ax, [.dirclus]
+        call    dir_purge_lfn
+
         call    disk_flush_fat
         jc      .io_error
 
@@ -1538,6 +1544,8 @@ file_delete:
         pop     cx
         pop     bx
         ret
+
+.dirclus: dw 0
 
 ; ---------------------------------------------------------------------------
 ; sft_bind_file - SFT をディスク上のファイルに結びつける
@@ -1624,13 +1632,7 @@ sft_bind_kind:
         ret
 
 ; --- 変数 ------------------------------------------------------------------
-; FILES= で決まる実際のエントリ数。ヘッダの中に入れてはいけないので手前に置く。
-; ヘッダの +06 からエントリが並んでいる、というのが外から見える約束で、
-; 途中に何か挟むと SFT 連鎖を辿るツールがそこを 1 個目のエントリとして読む。
-sft_count:      db SFT_ENTRIES
-
-; テーブルのヘッダと本体。List of Lists の +04 が sft_header を指す。
-sft_header:
-                dd 0xFFFFFFFF                   ; 次のテーブルは無い
-                dw SFT_ENTRIES
-sft_table:      times MAX_SFT_ENTRIES * SFT_ENTSIZE db 0
+; sft_count / sft_header / sft_table は io.asm の末尾 (場所だけ確保する
+; 領域) にまとめて置いてある。ヘッダの +06 からエントリが並んでいる、
+; というのが外から見える約束なので、3 つは必ず隣り合っていなければ
+; ならない。中身は sft_init が起動時に作る。

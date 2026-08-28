@@ -150,7 +150,9 @@ SFTH_NEXT       equ 0x00        ; dword: 次のテーブル (FFFF:FFFF = 最後)
 SFTH_COUNT      equ 0x04        ; word: このテーブルのエントリ数
 SFTH_ENTRIES    equ 0x06        ; ここから SFT が並ぶ
 SFT_ENTRIES     equ 40          ; システム全体で開けるファイル数の既定値
-MAX_SFT_ENTRIES equ 100         ; FILES= で増やせる上限
+MAX_SFT_ENTRIES equ 60          ; FILES= で増やせる上限。カーネルは 1 つの
+                                ; セグメント (64KB) に収まらなければならず、
+                                ; この表がその内訳でいちばん大きい。
 
 ; SFT_DEVINFO のビット
 SFTI_CHAR       equ 0x8000      ; 1 = 文字デバイス, 0 = ブロック (ディスク上のファイル)

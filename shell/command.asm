@@ -24,6 +24,17 @@ FIND_SIZE       equ 0x1A
 FIND_NAME       equ 0x1E
 
 ATTR_DIRECTORY  equ 0x10
+
+; --- 長い名前の検索が返す構造体 (Win32 の WIN32_FIND_DATA と同じ並び) ---
+LFD_ATTR        equ 0x00        ; dword: 属性
+LFD_TIME        equ 0x14        ; word:  最終更新の時刻 (DOS 形式)
+LFD_DATE        equ 0x16        ; word:  最終更新の日付 (DOS 形式)
+LFD_SIZE        equ 0x20        ; dword: 大きさ (下位)
+LFD_NAME        equ 0x2C        ; 260 バイト: 長い名前
+LFD_SHORT       equ 0x130       ; 14 バイト: 短い名前
+LFD_SIZE_TOTAL  equ 318
+
+DIR_NAME_COLS   equ 30          ; DIR の名前欄の桁数
 ATTR_VOLUME     equ 0x08
 
 MAXLINE         equ 128
@@ -267,7 +278,7 @@ cmd_dir:
         mov     si, str_all
 .have_arg:
         mov     di, path_buf
-        call    strcpy
+        call    strcpy_path
 
         ; ディレクトリ名だけを指定された場合は "\*.*" を足す。
         ; 判定は「属性を引いてディレクトリだったら」で行う。
@@ -293,6 +304,26 @@ cmd_dir:
         mov     dword [file_count], 0
         mov     dword [byte_count], 0
 
+        ; まず長い名前で探す (AX=714Eh)。使えなければ 8.3 の側に落ちる。
+        ; 長い名前の窓口が無い DOS では CF=1 で AX=7100h が返る約束なので、
+        ; 呼ぶ側はそれを見て古いやり方に切り替えられる。
+        mov     dx, path_buf
+        mov     cx, ATTR_DIRECTORY      ; CL = 属性マスク
+        mov     si, 1                   ; 時刻は DOS の形式で
+        push    es
+        push    ds
+        pop     es
+        mov     di, lfn_find_buf
+        mov     ax, 0x714E
+        int     0x21
+        pop     es
+        jc      .try_short
+        mov     [dir_lfn_handle], ax
+        mov     byte [dir_use_lfn], 1
+        jmp     .entry
+
+.try_short:
+        mov     byte [dir_use_lfn], 0
         mov     dx, path_buf
         mov     cx, ATTR_DIRECTORY
         mov     ah, 0x4E                ; FindFirst
@@ -301,10 +332,31 @@ cmd_dir:
 
 .entry:
         call    .show_entry
+        cmp     byte [dir_use_lfn], 0
+        je      .short_next
+
+        push    es
+        push    ds
+        pop     es
+        mov     di, lfn_find_buf
+        mov     bx, [dir_lfn_handle]
+        mov     si, 1
+        mov     ax, 0x714F              ; 続きを探す
+        int     0x21
+        pop     es
+        jnc     .entry
+
+        mov     bx, [dir_lfn_handle]
+        mov     ax, 0x71A1              ; 検索を閉じる
+        int     0x21
+        jmp     .summary
+
+.short_next:
         mov     ah, 0x4F                ; FindNext
         int     0x21
         jnc     .entry
 
+.summary:
         ; --- 集計 ---
         call    newline
         mov     eax, [file_count]
@@ -347,31 +399,63 @@ cmd_dir:
         push    dx
         push    si
 
-        mov     bx, dta_buf
+        ; 探し方が 2 通りあるので、まず要る値を 1 か所に取り出す
+        cmp     byte [dir_use_lfn], 0
+        je      .from_dta
 
+        mov     bx, lfn_find_buf
+        mov     al, [bx + LFD_ATTR]
+        mov     [.attr], al
+        mov     ax, [bx + LFD_TIME]
+        mov     [.time], ax
+        mov     ax, [bx + LFD_DATE]
+        mov     [.date], ax
+        mov     eax, [bx + LFD_SIZE]
+        mov     [.size], eax
+        lea     ax, [bx + LFD_NAME]
+        mov     [.name], ax
+        jmp     .have_fields
+
+.from_dta:
+        mov     bx, dta_buf
+        mov     al, [bx + FIND_ATTR]
+        mov     [.attr], al
+        mov     ax, [bx + FIND_TIME]
+        mov     [.time], ax
+        mov     ax, [bx + FIND_DATE]
+        mov     [.date], ax
+        mov     eax, [bx + FIND_SIZE]
+        mov     [.size], eax
+        lea     ax, [bx + FIND_NAME]
+        mov     [.name], ax
+
+.have_fields:
         ; ボリュームラベルは飛ばす
-        test    byte [bx + FIND_ATTR], ATTR_VOLUME
+        test    byte [.attr], ATTR_VOLUME
         jnz     .skip
 
-        ; 名前を 12 桁の左詰めで
-        push    bx
-        lea     si, [bx + FIND_NAME]
+        ; 名前。長い名前が入るように桁を広げてある。
+        mov     si, [.name]
         call    puts
-        lea     si, [bx + FIND_NAME]
+        mov     si, [.name]
         call    strlen
-        mov     ax, 13
+        mov     ax, DIR_NAME_COLS
+        cmp     cx, DIR_NAME_COLS - 1
+        jb      .pad
+        mov     ax, cx
+        inc     ax                      ; 桁を超えたら空白 1 つだけ空ける
+.pad:
         sub     ax, cx
         call    put_spaces
-        pop     bx
 
         ; ディレクトリなら <DIR>、ファイルならサイズ
-        test    byte [bx + FIND_ATTR], ATTR_DIRECTORY
+        test    byte [.attr], ATTR_DIRECTORY
         jz      .is_file
         mov     si, msg_dir_tag
         call    puts
         jmp     .datetime
 .is_file:
-        mov     eax, [bx + FIND_SIZE]
+        mov     eax, [.size]
         push    eax
         call    count_digits            ; AX = 桁数
         mov     cx, 10
@@ -381,18 +465,18 @@ cmd_dir:
         pop     eax
         call    put_dec32
         inc     dword [file_count]
-        mov     eax, [bx + FIND_SIZE]
+        mov     eax, [.size]
         add     [byte_count], eax
 
 .datetime:
         mov     al, ' '
         call    putc
         call    putc
-        mov     ax, [bx + FIND_DATE]
+        mov     ax, [.date]
         call    put_date
         mov     al, ' '
         call    putc
-        mov     ax, [bx + FIND_TIME]
+        mov     ax, [.time]
         call    put_time
         call    newline
 
@@ -403,13 +487,18 @@ cmd_dir:
         pop     bx
         pop     ax
         ret
+.attr:  db 0
+.time:  dw 0
+.date:  dw 0
+.size:  dd 0
+.name:  dw 0
 
 ; --- TYPE ------------------------------------------------------------------
 cmd_type:
         cmp     byte [si], 0
         je      .no_arg
         mov     di, path_buf
-        call    strcpy
+        call    strcpy_path
 
         mov     dx, path_buf
         mov     ax, 0x3D00              ; 読み取りで開く
@@ -470,7 +559,7 @@ cmd_cd:
         ret
 .change:
         mov     di, path_buf
-        call    strcpy
+        call    strcpy_path
         mov     dx, path_buf
         mov     ah, 0x3B
         int     0x21
@@ -486,7 +575,7 @@ cmd_md:
         cmp     byte [si], 0
         je      .no_arg
         mov     di, path_buf
-        call    strcpy
+        call    strcpy_path
         mov     dx, path_buf
         mov     ah, 0x39
         int     0x21
@@ -506,7 +595,7 @@ cmd_rd:
         cmp     byte [si], 0
         je      cmd_md.no_arg
         mov     di, path_buf
-        call    strcpy
+        call    strcpy_path
         mov     dx, path_buf
         mov     ah, 0x3A
         int     0x21
@@ -522,7 +611,7 @@ cmd_del:
         cmp     byte [si], 0
         je      cmd_md.no_arg
         mov     di, path_buf
-        call    strcpy
+        call    strcpy_path
         mov     dx, path_buf
         mov     ah, 0x41
         int     0x21
@@ -1149,6 +1238,42 @@ strlen:
         pop     ax
         ret
 
+; ; strcpy_path - パスとして写す。前後の二重引用符は外す。
+;
+; 長い名前には空白が入りうるので、シェルの引数は引用符で囲めるように
+; してある。囲みはシェルの都合なので、DOS に渡す前に外しておく。
+strcpy_path:
+        push    ax
+        push    si
+        push    di
+        cmp     byte [si], '"'
+        jne     .plain
+        inc     si
+.qloop:
+        mov     al, [si]
+        test    al, al
+        jz      .done
+        cmp     al, '"'
+        je      .done
+        inc     si
+        mov     [di], al
+        inc     di
+        jmp     .qloop
+.plain:
+        mov     al, [si]
+        test    al, al
+        jz      .done
+        inc     si
+        mov     [di], al
+        inc     di
+        jmp     .plain
+.done:
+        mov     byte [di], 0
+        pop     di
+        pop     si
+        pop     ax
+        ret
+
 ; strcpy: DS:SI → DS:DI (0 終端込み)。DI は終端の 0 を指して返る
 strcpy:
         push    ax
@@ -1203,7 +1328,29 @@ streq:
 ; copy_word: DS:SI から空白までを DS:DI へ写す (0 終端付き)
 copy_word:
         push    ax
-.loop:
+
+        ; 二重引用符で囲まれていれば、その中は空白も名前の一部として扱う。
+        ; 長い名前には空白が入りうるので、これが無いと
+        ;   COPY README.TXT "my notes.txt"
+        ; のような書き方ができない。囲みの中では引用符だけが終わりの印。
+        cmp     byte [si], '"'
+        jne     .plain
+        inc     si
+.quoted:
+        mov     al, [si]
+        test    al, al
+        jz      .done
+        cmp     al, '"'
+        je      .close
+        inc     si
+        mov     [di], al
+        inc     di
+        jmp     .quoted
+.close:
+        inc     si                      ; 閉じの引用符を飛ばす
+        jmp     .done
+
+.plain:
         mov     al, [si]
         test    al, al
         jz      .done
@@ -1214,7 +1361,7 @@ copy_word:
         inc     si
         mov     [di], al
         inc     di
-        jmp     .loop
+        jmp     .plain
 .done:
         mov     byte [di], 0
         pop     ax
@@ -1600,6 +1747,9 @@ bat_buf:        times BATMAX db 0
 ; DTA は PSP:0080 のままだと入力バッファと重なるので、自前のものを使う。
 ; (PSP の 0080 はコマンドテイルの置き場でもあるため)
 dta_buf:        times 48 db 0
+lfn_find_buf:   times LFD_SIZE_TOTAL db 0   ; 長い名前の検索が返す構造体
+dir_use_lfn:    db 0                        ; 1 = 長い名前の窓口で探している
+dir_lfn_handle: dw 0                        ; そのときの検索の番号
 
                 times 512 db 0
 stack_top:

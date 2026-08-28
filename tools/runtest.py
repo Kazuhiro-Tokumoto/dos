@@ -38,12 +38,13 @@ REQUIRED = [
      "CONFIG.SYS の DEVICE= がブロックデバイスを組み込む"),
     ("INSTALL: instest ran with args: alpha beta",
      "CONFIG.SYS の INSTALL= がプログラムを引数付きで実行する"),
+    ("My Long File Name.txt", "DIR が長いファイル名をそのまま表示する"),
 ]
 
 # XMSTEST / CFGTEST / HDTEST / DOSINT / FCBTEST / DOSTEST / ENVTEST の
-# 7 本が、それぞれ集計行と終了の目印を出す。ENVTEST は A: と C: の
-# 両方から走らせるので、集計行は 8 本ぶん出る。
-EXPECTED_SUITES = 8
+# LFNTEST を加えた 8 本が、それぞれ集計行と終了の目印を出す。
+# ENVTEST は A: と C: の両方から走らせるので、集計行は 9 本ぶん出る。
+EXPECTED_SUITES = 9
 
 
 def run(image, timeout, qemu, keep_log, hd):

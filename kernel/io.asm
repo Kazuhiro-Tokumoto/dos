@@ -54,7 +54,7 @@ kernel_entry:
         mov     es, ax
         xor     si, si
         xor     di, di
-        mov     cx, kernel_end
+        mov     cx, kernel_bss          ; 実体のある部分だけ写せばよい
         rep     movsb                   ; DL は保たれる
 
         jmp     KERNEL_SEG:kernel_main
@@ -68,6 +68,17 @@ kernel_main:
         mov     ss, ax
         mov     sp, boot_stack_top
         cld
+
+        ; ファイルに入っていない領域を 0 で埋める。開いているファイルの表の
+        ; ように「0 = 未使用」で始まらないと困るものがここにある。
+        push    di
+        push    cx
+        mov     di, kernel_bss
+        mov     cx, kernel_end - kernel_bss
+        xor     al, al
+        rep     stosb
+        pop     cx
+        pop     di
         sti
 
         mov     [boot_drive], dl
@@ -107,10 +118,13 @@ kernel_main:
         ; --- MCB アリーナはカーネルの直後から 640KB まで ---
         ; カーネルの大きさをパラグラフに切り上げて自分のセグメントに足す。
         ; (kernel_end は再配置可能なラベルなのでアセンブル時には割れない)
-        mov     ax, kernel_end
-        add     ax, 15
-        mov     cl, 4
-        shr     ax, cl
+        ; 32bit で計算する。kernel_end は 64KB のすぐ手前まで来ることが
+        ; あり、16bit のまま 15 を足すと回り込んで 0 近くになる。そうなると
+        ; アリーナの先頭がカーネル自身の上に重なり、最初の MCB を書いた
+        ; 時点でカーネルの先頭を壊す。
+        mov     eax, kernel_end
+        add     eax, 15
+        shr     eax, 4
         mov     cx, cs
         add     ax, cx
         call    mem_init
@@ -769,6 +783,7 @@ int26_handler:
 %include "buffer.inc"
 %include "cds.inc"
 %include "device.inc"
+%include "lfn.inc"
 %include "fat.inc"
 %include "mem.inc"
 %include "file.inc"
@@ -817,6 +832,14 @@ boot_psp:       times PSP_SIZE db 0
 ; --- バッファ --------------------------------------------------------------
 name83:         times 11 db 0           ; 8.3 に畳んだ作業用の名前
 dir_cur_lba:    dd 0                    ; dir_buf に載っているセクタの LBA
+; BIOS のディスク転送に渡すバッファは、この「場所だけ確保する」領域
+; ではなく、必ずカーネルの前のほうに置くこと。
+;
+; INT 13h の転送は DMA で行われ、DMA は 64KB の物理境界をまたげない。
+; カーネルは 0x0060:0000 — 物理 0x600 — に居るので、セグメントの終わり近く
+; (オフセット 0xF800 あたり) に置いたバッファは物理 0x10000 をまたいでしまい、
+; 転送がまるごと失敗する。ディレクトリが 1 つも読めなくなり、
+; 「COMMAND.COM が無い」という形で表に出た。
 dir_buf:        times SECTOR_SIZE db 0
 sector_buf:     times SECTOR_SIZE db 0
 fat_buf:        times FAT_RESIDENT_SECS * SECTOR_SIZE db 0  ; 常駐 FAT (FAT12 用)
@@ -839,4 +862,40 @@ kernel_stack_top:
                 times 1024 db 0
 boot_stack_top:
 
+; ============================================================================
+; ここから先は IO.SYS のファイルには入らない
+;
+; 大きな表やバッファを、中身のない「場所の確保」に変えてある。0 で埋めた
+; ものをそのままファイルに持たせると、IO.SYS がその分だけ大きくなる。
+; カーネルは 0x0060:0000 に置いた 1 つのセグメントの中で動くので、
+; 64KB を 1 バイトでも超えるとオフセットが回り込んで即座に壊れる。
+; 実際、長い名前のための表を足した時点で 63 バイト超えて起動しなくなった。
+;
+; 中身は不定なので、起動時に 0 で埋めてから使う (kernel_main の頭)。
+; ============================================================================
+kernel_bss:
+
+; absolute を使うと、NASM は場所の割り当てだけして何も出力しない。
+; resb を普通に並べると -f bin では 0 が書き出されてしまい、
+; ファイルを小さくするという目的が果たせない。
+                absolute kernel_bss
+
+; 開いているファイルの表。この 3 つはこの順で隣り合っていなければ
+; ならない。List of Lists の +04 が sft_header を指し、その +06 から
+; エントリが並んでいる、というのが外から見える約束になっている。
+sft_count:      resb 1                  ; FILES= で決まった実際のエントリ数
+sft_header:     resb 6                  ; 次のテーブルへの far ポインタ + 個数
+sft_table:      resb MAX_SFT_ENTRIES * SFT_ENTSIZE
+drive_tab:      resb MAX_DRIVES * DRV_ENTSIZE        ; ドライブごとの諸元
+cds_table:      resb MAX_DRIVES * CDS_ENTSIZE        ; カレントディレクトリの表
+lfn_name:       resb LFN_MAXENT * LFN_CHARS + 2      ; 組み立て中の長い名前
+name_long:      resb LFN_MAXLEN + 1                  ; 照合したい名前
+find_longname:  resb LFN_MAXLEN + 1                  ; 直前に見つけたものの名前
+lfn_states:     resb LFN_SLOTS * LFN_STATE_SIZE      ; 長い名前の検索の状態
+find_pattern_long: resb LFN_MAXLEN + 1               ; 検索パターン (畳む前)
+path_buf:       resb LFN_PATHMAX
+path_buf2:      resb LFN_PATHMAX
+
 kernel_end:
+
+                __SECT__        ; 元のセクションに戻す

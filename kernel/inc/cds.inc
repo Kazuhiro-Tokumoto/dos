@@ -250,4 +250,3 @@ cds_set_drive:
 ; --- 変数 ------------------------------------------------------------------
 cur_drive:      db 0                    ; カレントドライブ (0 = A:)
 num_drives:     db 1                    ; 実在するドライブの数
-cds_table:      times MAX_DRIVES * CDS_ENTSIZE db 0

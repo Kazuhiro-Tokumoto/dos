@@ -580,6 +580,8 @@ dir_find:
         push    ds
         pop     es
 
+        call    lfn_reset               ; 長い名前の組み立てをやり直す
+
         xor     bx, bx                  ; セクタ番号
 .next_sector:
         mov     ax, [.dirclus]
@@ -597,7 +599,13 @@ dir_find:
 
         mov     al, [di + DIR_ATTR]
         cmp     al, ATTR_LFN
-        je      .skip                   ; 長いファイル名の断片は無視する
+        jne     .real_entry
+
+        ; 長い名前の断片。組み立てに足して、次へ。
+        call    lfn_take
+        jmp     .advance
+
+.real_entry:
         test    al, ATTR_VOLUME
         jnz     .skip
 
@@ -610,10 +618,27 @@ dir_find:
 .want_file:
         ; ファイルは常に対象
 .compare:
-        call    name_match
+        call    name_match              ; まず短い名前で
+        je      .found
+
+        ; 短い名前で合わなければ、直前の断片から組み立てた長い名前で見る。
+        ; 8.3 に畳んだ時点で潰れてしまう名前 ("report-2026.txt" など) は
+        ; こちらでしか一致しない。
+        cmp     byte [lfn_match_enable], 0
+        je      .skip
+        call    lfn_ready
+        jc      .skip
+        push    si
+        mov     si, name_long
+        call    lfn_match
+        pop     si
         je      .found
 
 .skip:
+        ; 本体のエントリを 1 つ跨いだので、組み立て中のものは捨てる。
+        ; 残しておくと、次のファイルに前のファイルの名前が付いて見える。
+        call    lfn_reset
+.advance:
         add     di, DIR_ENTSIZE
         loop    .next_entry
 
@@ -697,27 +722,61 @@ dir_alloc_entry:
         ret
 
 .extend:
-        ; ルートディレクトリは伸ばせない
-        cmp     word [.dirclus], 0
-        je      .full
+        mov     ax, [.dirclus]
+        call    dir_extend
+        jc      .full
+
+        ; 伸ばしたので最初から探し直す
+        xor     bx, bx
+        jmp     .next_sector
+
+.full:
+        pop     es
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        stc
+        ret
+.dirclus: dw 0
+.newclus: dw 0
+
+; ---------------------------------------------------------------------------
+; dir_extend - サブディレクトリをクラスタ 1 つぶん伸ばす
+;   入力: AX = ディレクトリのクラスタ (0 = ルート)
+;   出力: CF=0 なら伸ばせた
+;
+; ルートディレクトリは大きさが固定なので伸ばせない。本物と同じ制限。
+; ---------------------------------------------------------------------------
+dir_extend:
+        push    ax
+        push    bx
+        push    cx
+        push    dx
+        push    di
+        push    es
+
+        push    ds
+        pop     es
+
+        test    ax, ax
+        jz      .fail                   ; ルートは伸ばせない
+        mov     [.dirclus], ax
 
         call    fat_alloc
-        jc      .full
+        jc      .fail
         mov     [.newclus], ax
 
         ; 新しいクラスタを 0 で埋める (未使用エントリの印は 0x00)
-        push    di
         mov     di, dir_buf
         mov     cx, SECTOR_SIZE
         xor     al, al
         rep     stosb
-        pop     di
 
         mov     ax, [.newclus]
         call    clus_to_lba
         mov     cx, [sec_per_clus]
         mov     [dir_cur_lba], eax
-        push    bx
         mov     bx, dir_buf
 .zero_loop:
         push    cx
@@ -729,7 +788,6 @@ dir_alloc_entry:
         pop     cx
         inc     eax
         loop    .zero_loop
-        pop     bx
 
         ; 連鎖の末尾に繋ぐ
         mov     ax, [.dirclus]
@@ -746,12 +804,17 @@ dir_alloc_entry:
         mov     dx, [.newclus]
         call    fat_set
 
-        ; 伸ばしたので最初から探し直す
-        xor     bx, bx
-        jmp     .next_sector
-
-.full:
         pop     es
+        pop     di
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        clc
+        ret
+.fail:
+        pop     es
+        pop     di
         pop     dx
         pop     cx
         pop     bx
@@ -760,6 +823,389 @@ dir_alloc_entry:
         ret
 .dirclus: dw 0
 .newclus: dw 0
+
+; ---------------------------------------------------------------------------
+; dir_alloc_named - 長い名前の断片ごとディレクトリのエントリを確保する
+;   入力: AX = ディレクトリのクラスタ, name_long = 付けたい名前
+;   出力: CF=0 なら name83 に短い名前が入り、dir_buf に本体のセクタが載って
+;         DI = 本体のエントリ (32 バイト 0 クリア済み)。
+;         呼び出し側はそこを埋めて dir_store すればよい。
+;
+; 名前が 8.3 にそのまま収まるなら断片は作らない。収まらないときだけ、
+; 本体の手前に断片を並べる。断片と本体は連続していなければならないので、
+; まとめて空きを探す。
+; ---------------------------------------------------------------------------
+dir_alloc_named:
+        push    ax
+        push    bx
+        push    cx
+        push    dx
+        push    si
+        push    es
+
+        push    ds
+        pop     es
+        mov     [.dirclus], ax
+
+        call    lfn_fits_83
+        jnc     .plain                  ; 8.3 に収まる = 断片は要らない
+
+        ; 短い名前を作る (重複しない ~N を選ぶ)
+        mov     ax, [.dirclus]
+        call    lfn_make_short
+        jc      .fail
+
+        call    lfn_entry_count         ; CX = 断片の数
+        mov     [.nfrag], cx
+        inc     cx
+        mov     [.need], cx
+
+        ; 連続した空きを探す
+        mov     byte [.tries], 0
+.scan:
+        call    .find_run
+        jnc     .got_run
+        ; 見つからない → ディレクトリを伸ばして探し直す
+        inc     byte [.tries]
+        cmp     byte [.tries], 8
+        ja      .fail
+        mov     ax, [.dirclus]
+        call    dir_extend
+        jc      .fail
+        jmp     .scan
+
+.got_run:
+        ; 断片を並べる。ディレクトリの中では「後ろの断片が先」に来るので、
+        ; 走りの先頭に並び番号のいちばん大きいものを置く。
+        mov     cx, [.nfrag]
+        mov     [.seq], cx              ; 最初に書くのは番号 nfrag
+        xor     dx, dx                  ; 走りの中の位置
+.frag_loop:
+        cmp     dx, [.nfrag]
+        jae     .frags_done
+
+        push    dx
+        mov     ax, dx
+        call    .seek                   ; dir_buf にそのセクタ、DI = エントリ
+        pop     dx
+        jc      .fail
+
+        push    dx
+        mov     ax, [.seq]
+        mov     bx, dx                  ; 走りの中の位置 (未使用)
+        cmp     dx, 0
+        jne     .not_first
+        or      ax, LFN_LAST            ; 走りの先頭 = 連鎖の先頭
+.not_first:
+        call    lfn_write_frag          ; AX = 並び番号(+0x40), DI = 置き場所
+        call    dir_store
+        pop     dx
+
+        dec     word [.seq]
+        inc     dx
+        jmp     .frag_loop
+
+.frags_done:
+        ; 本体のエントリを 0 で埋めて返す
+        mov     ax, [.nfrag]
+        call    .seek
+        jc      .fail
+        push    di
+        mov     cx, DIR_ENTSIZE
+        xor     al, al
+        rep     stosb
+        pop     di
+
+        pop     es
+        pop     si
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        clc
+        ret
+
+.plain:
+        ; 8.3 に収まる名前。path_resolve が作った name83 をそのまま使う。
+        mov     ax, [.dirclus]
+        call    dir_alloc_entry
+        jc      .fail
+        pop     es
+        pop     si
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        clc
+        ret
+.fail:
+        pop     es
+        pop     si
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        stc
+        ret
+
+; .find_run - [.need] 個ぶん続いた空きエントリを探す
+;   出力: CF=0 なら [.runsec] / [.runent] に走りの先頭
+.find_run:
+        push    ax
+        push    bx
+        push    cx
+        push    dx
+        push    di
+
+        xor     bx, bx                  ; セクタ番号
+        xor     dx, dx                  ; いま続いている空きの数
+.rs_sector:
+        mov     ax, [.dirclus]
+        call    dir_load
+        jc      .rs_none                ; ディレクトリの終わり
+
+        mov     di, dir_buf
+        xor     cx, cx                  ; エントリ番号
+.rs_entry:
+        cmp     cx, SECTOR_SIZE / DIR_ENTSIZE
+        jae     .rs_next_sector
+
+        mov     al, [di + DIR_NAME]
+        cmp     al, DIR_END
+        je      .rs_free
+        cmp     al, DIR_FREE
+        je      .rs_free
+        xor     dx, dx                  ; 使用中 = 走りは切れた
+        jmp     .rs_advance
+.rs_free:
+        test    dx, dx
+        jnz     .rs_grow
+        mov     [.runsec], bx           ; 走りの先頭を覚える
+        mov     [.runent], cx
+.rs_grow:
+        inc     dx
+        cmp     dx, [.need]
+        jae     .rs_found
+.rs_advance:
+        add     di, DIR_ENTSIZE
+        inc     cx
+        jmp     .rs_entry
+.rs_next_sector:
+        inc     bx
+        jmp     .rs_sector
+
+.rs_found:
+        pop     di
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        clc
+        ret
+.rs_none:
+        pop     di
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        stc
+        ret
+
+; .seek - 走りの中の AX 番目のエントリを dir_buf に載せて DI を合わせる
+.seek:
+        push    ax
+        push    bx
+        push    cx
+        push    dx
+
+        ; 通し番号 = 走りの先頭のエントリ番号 + AX
+        add     ax, [.runent]
+        mov     cx, SECTOR_SIZE / DIR_ENTSIZE
+        xor     dx, dx
+        div     cx                      ; AX = セクタの繰り上がり, DX = 位置
+        add     ax, [.runsec]
+        mov     bx, ax                  ; BX = セクタ番号
+        mov     [.entoff], dx
+
+        mov     ax, [.dirclus]
+        call    dir_load
+        jc      .seek_fail
+
+        mov     ax, [.entoff]
+        mov     cx, DIR_ENTSIZE
+        mul     cx
+        mov     di, dir_buf
+        add     di, ax
+
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        clc
+        ret
+.seek_fail:
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        stc
+        ret
+
+.dirclus: dw 0
+.nfrag:   dw 0
+.need:    dw 0
+.seq:     dw 0
+.runsec:  dw 0
+.runent:  dw 0
+.entoff:  dw 0
+.tries:   db 0
+
+; ---------------------------------------------------------------------------
+; dir_purge_lfn - 取り残された長い名前の断片を片付ける
+;   入力: AX = ディレクトリのクラスタ (0 = ルート)
+;
+; ファイルを消したり名前を変えたりすると、その手前に並んでいた断片が
+; 宙に浮く。放っておくと、次にそこへ作られたファイルに前の名前が
+; 付いて見える。本体が消えている、あるいはチェックサムが合わない断片の
+; 連なりを 0xE5 (未使用) にする。
+;
+; 1 回の走査で 1 連なりだけ片付けて最初からやり直す。ディレクトリは
+; 小さいので、これで十分に速い。
+; ---------------------------------------------------------------------------
+dir_purge_lfn:
+        push    ax
+        push    bx
+        push    cx
+        push    dx
+        push    si
+        push    di
+        push    es
+
+        push    ds
+        pop     es
+        mov     [.dirclus], ax
+        mov     word [.rounds], 0
+
+.restart:
+        inc     word [.rounds]
+        cmp     word [.rounds], 256
+        ja      .done                   ; 念のための歯止め
+
+        mov     word [.runlen], 0
+        xor     bx, bx                  ; セクタ番号
+.sector:
+        mov     ax, [.dirclus]
+        call    dir_load
+        jc      .tail                   ; ディレクトリの終わり
+
+        mov     di, dir_buf
+        xor     cx, cx
+.entry:
+        cmp     cx, SECTOR_SIZE / DIR_ENTSIZE
+        jae     .next_sector
+
+        mov     al, [di + DIR_NAME]
+        cmp     al, DIR_END
+        je      .tail
+        cmp     al, DIR_FREE
+        je      .terminator             ; 消されたもの = 連なりは宙に浮く
+
+        mov     al, [di + DIR_ATTR]
+        cmp     al, ATTR_LFN
+        jne     .real
+
+        ; 断片。連なりの始まりなら位置を覚える。
+        cmp     word [.runlen], 0
+        jne     .run_grow
+        mov     [.runsec], bx
+        mov     [.runent], cx
+        mov     al, [di + LFN_CKSUM]
+        mov     [.runsum], al
+.run_grow:
+        inc     word [.runlen]
+        jmp     .advance
+
+.real:
+        ; 本体のエントリ。直前の連なりがこれのものか見る。
+        cmp     word [.runlen], 0
+        je      .advance                ; 連なりは無い
+
+        call    lfn_checksum            ; ES:DI の 11 バイトから
+        cmp     al, [.runsum]
+        je      .run_ok
+        jmp     .free_run
+.run_ok:
+        mov     word [.runlen], 0
+        jmp     .advance
+
+.terminator:
+        ; 消されたエントリ。手前の連なりがあれば宙に浮いている。
+        cmp     word [.runlen], 0
+        jne     .free_run
+.advance:
+        add     di, DIR_ENTSIZE
+        inc     cx
+        jmp     .entry
+.next_sector:
+        inc     bx
+        jmp     .sector
+
+.tail:
+        ; ディレクトリの終わりに達した。残っている連なりは宙に浮いている。
+        cmp     word [.runlen], 0
+        jne     .free_run
+        jmp     .done
+
+; --- 連なりを未使用にする ---
+.free_run:
+        mov     word [.idx], 0
+.free_loop:
+        mov     ax, [.idx]
+        cmp     ax, [.runlen]
+        jae     .freed
+
+        ; 連なりの中の AX 番目のエントリの位置を出す
+        add     ax, [.runent]
+        mov     cx, SECTOR_SIZE / DIR_ENTSIZE
+        xor     dx, dx
+        div     cx
+        add     ax, [.runsec]
+        mov     bx, ax
+        push    dx
+        mov     ax, [.dirclus]
+        call    dir_load
+        pop     dx
+        jc      .freed
+
+        mov     ax, dx
+        mov     cx, DIR_ENTSIZE
+        mul     cx
+        mov     di, dir_buf
+        add     di, ax
+        mov     byte [di + DIR_NAME], DIR_FREE
+        call    dir_store
+
+        inc     word [.idx]
+        jmp     .free_loop
+.freed:
+        jmp     .restart
+
+.done:
+        pop     es
+        pop     di
+        pop     si
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        ret
+.dirclus: dw 0
+.runsec:  dw 0
+.runent:  dw 0
+.runlen:  dw 0
+.runsum:  db 0
+.idx:     dw 0
+.rounds:  dw 0
 
 ; ---------------------------------------------------------------------------
 ; path_resolve - パス文字列を「親ディレクトリのクラスタ + 8.3 名」に分解する
@@ -825,7 +1271,9 @@ path_resolve:
 .walk:
         mov     [.dirclus], ax
 
-        ; 名前を 1 つ切り出す
+        ; 名前を 1 つ切り出す。8.3 に畳んだものと、生のつづりの両方を
+        ; 控える。長い名前のファイルは前者では見つからない。
+        call    name_copy_component
         mov     di, name83
         call    name_to_83
 

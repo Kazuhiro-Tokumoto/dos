@@ -1811,7 +1811,328 @@ int21_table:
         dw f_58, f_59, f_5A, f_5B, f_5C, f_5D, f_5E, f_5F       ; 58-5F
         dw f_60, f_bad, f_62, f_nop_ok, f_nop_ok, f_65, f_66, f_nop_ok ; 60-67
         dw f_68, f_69, f_6A, f_nop_ok, f_6C, f_bad, f_bad, f_bad ; 68-6F
-        times (256 - 0x70) dw f_bad
+        dw f_bad, f_71, f_bad, f_bad, f_bad, f_bad, f_bad, f_bad ; 70-77
+        times (256 - 0x78) dw f_bad
+
+; ===========================================================================
+; 71h - 長いファイル名 (LFN)
+;
+; Windows 95 の DOS が足した窓口。AL に本来の機能番号を入れて呼ぶと、
+; 8.3 ではなく長い名前で同じことができる。使えないときは CF=1 で
+; AX=7100h を返す約束になっていて、呼ぶ側はそれを見て 8.3 の側に
+; 落ちるようにできている。
+; ===========================================================================
+f_71:
+        mov     al, [u_ax]              ; AL = 本来の機能番号
+
+        cmp     al, 0x4E
+        je      lfn_find_first
+        cmp     al, 0x4F
+        je      lfn_find_next
+        cmp     al, 0xA1
+        je      lfn_find_close
+        cmp     al, 0xA0
+        je      lfn_vol_info
+
+        ; パス名を取るだけの機能は、そのまま本来の窓口へ回せる。
+        ; path_resolve が長い名前を扱えるようになったので、中身は
+        ; 何も変えなくてよい。
+        cmp     al, 0x39
+        je      f_39                    ; ディレクトリを作る
+        cmp     al, 0x3A
+        je      f_3A                    ; ディレクトリを消す
+        cmp     al, 0x3B
+        je      f_3B                    ; カレントディレクトリを変える
+        cmp     al, 0x41
+        je      f_41                    ; ファイルを消す
+        cmp     al, 0x56
+        je      f_56                    ; 名前を変える
+        cmp     al, 0x6C
+        je      f_6C                    ; 拡張オープン
+
+        ; 知らない下位機能。「長い名前の窓口は無い」ではなく
+        ; 「その機能は無い」を返す。
+        mov     ax, 0x7100
+        jmp     int21_err
+
+; --- 71A0h: ボリュームの性質を返す ---
+;   出力: BX = 性質のビット, CX = 名前の最大長, DX = パスの最大長
+lfn_vol_info:
+        mov     word [u_bx], 0x4022     ; 大文字小文字を保つ / 大小を区別しない
+        mov     word [u_cx], LFN_MAXLEN
+        mov     word [u_dx], LFN_PATHMAX
+        mov     word [u_ax], 0
+        jmp     int21_ok
+
+; --- 714Eh: 長い名前で検索を始める ---
+;   入力: DS:DX = パス, CL = 属性マスク, ES:DI = 結果の置き場所 (318 バイト)
+;   出力: AX = 検索の番号
+lfn_find_first:
+        call    lfn_slot_alloc
+        jc      .no_slot
+        mov     [lfn_cur_slot], al
+
+        ; パスを控える。
+        ;
+        ; u_ds / u_dx はカーネル側の変数なので、DS を呼び出し側に
+        ; 付け替える *前* に読まなければならない。順番を逆にすると
+        ; 呼び出し側のセグメントの同じオフセットを読むことになり、
+        ; たいてい 0 が返って PSP の先頭 (CD 20 ...) をパスとして
+        ; 写してしまう。
+        mov     si, [u_dx]
+        mov     ax, [u_ds]
+        push    ds
+        mov     ds, ax
+        push    cs
+        pop     es
+        mov     di, path_buf
+        call    str_copy_z
+        pop     ds
+
+        ; DTA をこの検索用の場所に一時的に向ける
+        call    lfn_dta_push
+        call    lfn_long_on
+
+        mov     si, path_buf
+        mov     cl, [u_cx]              ; CL = 属性マスク
+        call    find_first
+        pushf
+        call    lfn_long_off
+        call    lfn_dta_pop
+        popf
+        jc      .none
+
+        call    lfn_store_result
+        movzx   ax, byte [lfn_cur_slot]
+        mov     [u_ax], ax
+        jmp     int21_ok
+.none:
+        mov     al, [lfn_cur_slot]
+        call    lfn_slot_free
+        mov     ax, ERR_NO_MORE_FILES
+        jmp     int21_err
+.no_slot:
+        mov     ax, ERR_TOO_MANY_FILES
+        jmp     int21_err
+
+; --- 714Fh: 続きを探す ---
+;   入力: BX = 検索の番号, ES:DI = 結果の置き場所
+lfn_find_next:
+        mov     bx, [u_bx]              ; BX = 検索の番号
+        cmp     bx, LFN_SLOTS
+        jae     .bad
+        cmp     byte [lfn_slot_used + bx], 0
+        je      .bad
+        mov     [lfn_cur_slot], bl
+
+        call    lfn_dta_push
+        call    lfn_long_on
+        call    find_next
+        pushf
+        call    lfn_long_off
+        call    lfn_dta_pop
+        popf
+        jc      .none
+
+        call    lfn_store_result
+        mov     word [u_ax], 0
+        jmp     int21_ok
+.none:
+        mov     ax, ERR_NO_MORE_FILES
+        jmp     int21_err
+.bad:
+        mov     ax, ERR_BAD_HANDLE
+        jmp     int21_err
+
+; --- 71A1h: 検索を終わる ---
+lfn_find_close:
+        mov     ax, [u_bx]
+        cmp     ax, LFN_SLOTS
+        jae     .bad
+        call    lfn_slot_free
+        mov     word [u_ax], 0
+        jmp     int21_ok
+.bad:
+        mov     ax, ERR_BAD_HANDLE
+        jmp     int21_err
+
+; --- 検索用の枠を取る / 返す ---
+lfn_slot_alloc:
+        push    bx
+        xor     al, al
+.loop:
+        movzx   bx, al
+        cmp     byte [lfn_slot_used + bx], 0
+        je      .found
+        inc     al
+        cmp     al, LFN_SLOTS
+        jb      .loop
+        pop     bx
+        stc
+        ret
+.found:
+        mov     byte [lfn_slot_used + bx], 1
+        pop     bx
+        clc
+        ret
+
+lfn_slot_free:
+        push    bx
+        movzx   bx, al
+        cmp     bx, LFN_SLOTS
+        jae     .out
+        mov     byte [lfn_slot_used + bx], 0
+.out:
+        pop     bx
+        ret
+
+; --- 長い名前での照合を入切する ---
+lfn_long_on:
+        mov     byte [find_long_mode], 1
+        ret
+
+lfn_long_off:
+        mov     byte [find_long_mode], 0
+        ret
+
+; --- DTA を検索用の場所に向ける / 戻す ---
+;
+; find_first / find_next は DOS の DTA を使う。長い名前の検索は DTA を
+; 使わない約束なので、呼んでいるあいだだけカーネル内の場所へ向けておく。
+lfn_dta_push:
+        push    ax
+        push    bx
+        mov     ax, [dta_seg]
+        mov     [lfn_save_dta_seg], ax
+        mov     ax, [dta_off]
+        mov     [lfn_save_dta_off], ax
+
+        mov     ax, cs
+        mov     [dta_seg], ax
+        movzx   bx, byte [lfn_cur_slot]
+        mov     ax, LFN_STATE_SIZE
+        mul     bl
+        add     ax, lfn_states
+        mov     [dta_off], ax
+        pop     bx
+        pop     ax
+        ret
+
+lfn_dta_pop:
+        push    ax
+        mov     ax, [lfn_save_dta_seg]
+        mov     [dta_seg], ax
+        mov     ax, [lfn_save_dta_off]
+        mov     [dta_off], ax
+        pop     ax
+        ret
+
+; --- 見つかったものを呼び出し側の構造体に書く ---
+;
+; Win32 の WIN32_FIND_DATA と同じ並び (318 バイト)。時刻の欄は本来
+; 1601 年からの 100ns 単位だが、ここには DOS の日付と時刻をそのまま
+; 下位 dword に置いている (SI=1 で呼ばれたときの形)。
+lfn_store_result:
+        push    ax
+        push    bx
+        push    cx
+        push    si
+        push    di
+        push    es
+
+        mov     es, [u_es]
+        mov     di, [u_di]
+
+        ; 検索状態を置いた場所 (カーネル内)
+        movzx   bx, byte [lfn_cur_slot]
+        mov     ax, LFN_STATE_SIZE
+        mul     bl
+        add     ax, lfn_states
+        mov     si, ax
+
+        ; 属性 (dword)
+        movzx   ax, byte [si + FIND_ATTR_FOUND]
+        mov     [es:di + 0x00], ax
+        mov     word [es:di + 0x02], 0
+
+        ; 作成 / 最終アクセス / 最終更新。DOS は最終更新しか持たない。
+        xor     ax, ax
+        mov     cx, 8
+        push    di
+        add     di, 0x04
+        rep     stosw                   ; 作成とアクセスを 0 で埋める
+        pop     di
+        mov     ax, [si + FIND_TIME]
+        mov     [es:di + 0x14], ax
+        mov     ax, [si + FIND_DATE]
+        mov     [es:di + 0x16], ax
+        mov     word [es:di + 0x18], 0
+        mov     word [es:di + 0x1A], 0
+
+        ; 大きさ (上位, 下位)
+        mov     word [es:di + 0x1C], 0
+        mov     word [es:di + 0x1E], 0
+        mov     ax, [si + FIND_SIZE]
+        mov     [es:di + 0x20], ax
+        mov     ax, [si + FIND_SIZE + 2]
+        mov     [es:di + 0x22], ax
+        mov     word [es:di + 0x24], 0
+        mov     word [es:di + 0x26], 0
+        mov     word [es:di + 0x28], 0
+        mov     word [es:di + 0x2A], 0
+
+        ; 長い名前
+        push    si
+        push    di
+        add     di, 0x2C
+        mov     si, find_longname
+        call    str_copy_z
+        pop     di
+        pop     si
+
+        ; 短い名前
+        push    si
+        push    di
+        add     di, 0x130
+        add     si, FIND_NAME
+        call    str_copy_z
+        pop     di
+        pop     si
+
+        pop     es
+        pop     di
+        pop     si
+        pop     cx
+        pop     bx
+        pop     ax
+        ret
+
+; str_copy_z - DS:SI の ASCIZ を ES:DI へ写す (最大 LFN_PATHMAX)
+str_copy_z:
+        push    ax
+        push    cx
+        mov     cx, LFN_PATHMAX
+.loop:
+        lodsb
+        stosb
+        test    al, al
+        jz      .done
+        loop    .loop
+        xor     al, al
+        stosb
+.done:
+        pop     cx
+        pop     ax
+        ret
+
+LFN_SLOTS       equ 4
+LFN_STATE_SIZE  equ 64
+LFN_PATHMAX     equ 260
+
+lfn_slot_used:      times LFN_SLOTS db 0
+lfn_cur_slot:       db 0
+lfn_save_dta_seg:   dw 0
+lfn_save_dta_off:   dw 0
 
 ; --- 変数 ------------------------------------------------------------------
 verify_flag:    db 0
@@ -1823,6 +2144,4 @@ vol_label:      db 'MYDOS      '        ; 11 バイト
 break_flag:     db 0
 indos_flag:     db 0
 last_error:     dw 0
-path_buf:       times 128 db 0
-path_buf2:      times 128 db 0
 

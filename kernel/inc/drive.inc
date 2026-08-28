@@ -1254,4 +1254,3 @@ cur_dpb:        dw drive_tab + DRV_DPB
 fat_resident_drv: db 0xFF               ; fat_buf に載っているドライブ
 fat_dirty:        db 0                  ; 書き換えたか
 
-drive_tab:      times MAX_DRIVES * DRV_ENTSIZE db 0
