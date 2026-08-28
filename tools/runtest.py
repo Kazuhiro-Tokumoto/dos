@@ -40,9 +40,9 @@ REQUIRED = [
      "CONFIG.SYS の INSTALL= がプログラムを引数付きで実行する"),
 ]
 
-# CFGTEST / HDTEST / DOSINT / FCBTEST / DOSTEST の 5 本が、
+# XMSTEST / CFGTEST / HDTEST / DOSINT / FCBTEST / DOSTEST の 6 本が、
 # それぞれ集計行と終了の目印を出す。
-EXPECTED_SUITES = 5
+EXPECTED_SUITES = 6
 
 
 def run(image, timeout, qemu, keep_log, hd):

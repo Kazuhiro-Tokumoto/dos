@@ -821,7 +821,7 @@ lol_init:
 
 ; --- 変数 ------------------------------------------------------------------
 req_ptr:        dd 0            ; STRATEGY が覚えた要求ヘッダの位置
-req_packet:     times 32 db 0   ; カーネルが組み立てる要求ヘッダ
+req_packet:     times REQ_PACKET_SIZE db 0  ; カーネルが組み立てる要求ヘッダ
 blk_unit:       db 0            ; ブロックデバイスの対象ユニット
 dev_con_ptr:    dd 0            ; いま有効な CON デバイス (far)
 dev_clock_ptr:  dd 0            ; いま有効な CLOCK$ デバイス (far)

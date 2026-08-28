@@ -32,7 +32,11 @@ CONFIG_MAXLINE  equ 128
 ;
 ; 失敗しても起動は続ける。CONFIG.SYS が無いのは異常ではない。
 ; ---------------------------------------------------------------------------
-config_process:
+; config_load - CONFIG.SYS を読んで、数と文字列の指定を控えるところまで
+;
+; まだ反映しない。DOS=HIGH が書いてあるかどうかで、このあとカーネルが
+; どこに居座るかが変わり、メモリの配り方も変わるため。
+config_load:
         push    ax
         push    bx
         push    cx
@@ -40,14 +44,35 @@ config_process:
         push    si
         push    di
 
+        mov     byte [config_found], 0
         call    config_read
         jc      .done                   ; 無ければ既定値のまま
-
+        mov     byte [config_found], 1
         call    config_scan             ; 数の指定を控える
+.done:
+        pop     di
+        pop     si
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        ret
+
+; config_finish - 控えた指定を反映し、DEVICE= と INSTALL= を処理する
+config_finish:
+        push    ax
+        push    bx
+        push    cx
+        push    dx
+        push    si
+        push    di
+
+        cmp     byte [config_found], 0
+        je      .done
+
         call    config_apply            ; 控えた数で組み直す
         call    config_devices          ; DEVICE= を順に読み込む
         call    config_installs         ; INSTALL= を実行する
-
 .done:
         pop     di
         pop     si
@@ -1246,6 +1271,7 @@ cfg_dos_umb:    db 0
 
 ; --- 作業用 ----------------------------------------------------------------
 config_len:     dw 0
+config_found:   db 0            ; CONFIG.SYS が読めたか
 cfg_line:       times CONFIG_MAXLINE db 0
 cfg_key:        times 16 db 0
 cfg_path:       times 80 db 0

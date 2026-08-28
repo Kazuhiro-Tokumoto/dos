@@ -25,6 +25,18 @@
 ; 0x0060:0000 (1.5KB の位置) へ降ろす。転送先が転送元より前にあるので
 ; 前進コピーで重なりの心配がない。
 ; ============================================================================
+; --- 先頭 16 バイトは HMA のための余白 ---------------------------------------
+;
+; HMA (High Memory Area) は FFFF:0010 から始まる。1MB ちょうどを指す
+; セグメント:オフセットの組が FFFF:0010 しか無いので、そこへ載せるものは
+; 「オフセット 10h から始まる」形でなければならない。
+;
+; そこでカーネル本体をオフセット 10h から置き、手前の 16 バイトは
+; Stage2 が飛んでくる先として使う。DOS=HIGH のときは、この 16 バイトを
+; 除いた本体だけを FFFF:0010 へ写せば、オフセットが 1 バイトもずれない。
+                jmp     kernel_entry
+                times 16 - ($ - $$) db 0
+
 kernel_entry:
         cli
         cld
@@ -70,35 +82,27 @@ kernel_main:
         ; --- 割り込みベクタを立てる ---
         call    install_vectors
 
-        ; --- デバイスドライバの連鎖を立てる ---
-        ; ディスクを触る前に済ませておく。ブロックデバイスも連鎖の一員で、
-        ; 以降のセクタ入出力はすべてここを通る。
-        call    dev_init
+        ; --- A20 と拡張メモリを調べる ---
+        ; ここで見ておかないと DOS=HIGH の判断ができない。A20 は
+        ; 要求されるまで閉じたままにする (当時の作法)。
+        call    xms_init
 
-        ; --- ディスクバッファ (BUFFERS=) ---
-        mov     al, DEFAULT_BUFFERS
-        call    buf_init
-
-        ; --- ディスク (BPB の取り込みと FAT の読み込み) ---
-        call    disk_init
+        ; --- DOS の内部テーブルを組み立てる ---
+        call    dos_init_tables
         jc      .disk_fail
 
-        ; --- ドライブごとのカレントディレクトリ (CDS) ---
-        ; 見つかったドライブが LASTDRIVE より多ければそちらに合わせる。
-        ; そうしないと検出したドライブに文字が割り当たらない。
-        mov     al, DEFAULT_LASTDRIVE
-        cmp     al, [num_drives]
-        jae     .lastdrive_ok
-        mov     al, [num_drives]
-.lastdrive_ok:
-        call    cds_init
+        ; --- カーネル自身の PSP ---
+        ; ファイルを開くにはハンドル表 (JFT) が要る。それが載るのは PSP なので、
+        ; カーネルにも 1 つ持たせる。これが無いと cur_psp が 0 のまま
+        ; ファイルを開くことになり、JFT の書き込みが 0000:0018 — 割り込み
+        ; ベクタの真ん中 — に飛ぶ。
+        call    boot_psp_init
 
-        ; --- ファイルハンドルの土台 ---
-        mov     al, SFT_ENTRIES
-        call    sft_init
+        ; --- CONFIG.SYS を読む ---
+        ; まだ反映はしない。DOS=HIGH が書いてあるかどうかで、この先の
+        ; メモリの配り方が変わるため、先に読むだけ読んでおく。
+        call    config_load
 
-        ; --- List of Lists の各ポインタを実体に向ける ---
-        call    lol_init
 
         ; --- MCB アリーナはカーネルの直後から 640KB まで ---
         ; カーネルの大きさをパラグラフに切り上げて自分のセグメントに足す。
@@ -126,33 +130,21 @@ kernel_main:
         mov     ax, [boot_env_seg]
         call    build_env
 
-        ; --- カーネル自身の PSP ---
-        ; ファイルを開くにはハンドル表 (JFT) が要る。それが載るのは PSP なので、
-        ; カーネルにも 1 つ持たせる。これが無いと cur_psp が 0 のまま
-        ; ファイルを開くことになり、JFT の書き込みが 0000:0018 — 割り込み
-        ; ベクタの真ん中 — に飛ぶ。
-        mov     ax, cs
-        mov     bx, boot_psp
-        mov     cl, 4
-        shr     bx, cl
-        add     ax, bx
-        mov     [boot_psp_seg], ax
-        mov     bx, 0xA000              ; 使える上限
-        xor     cx, cx                  ; 親はいない
-        mov     dx, [boot_env_seg]
-        call    build_psp
-        mov     ax, [boot_psp_seg]
-        mov     [cur_psp], ax
+        ; カーネルの PSP にも環境ブロックを教える
+        push    es
+        mov     es, [boot_psp_seg]
+        mov     ax, [boot_env_seg]
+        mov     [es:PSP_ENVSEG], ax
+        pop     es
 
         ; 既定のシェルは起動したドライブから読む
         mov     al, [cur_drive]
         add     al, 'A'
         mov     [shell_path], al
 
-        ; --- CONFIG.SYS ---
-        ; ここまでで既定値のまま一通り動く状態になっている。
-        ; CONFIG.SYS はその上で読み、書いてあるとおりに組み直す。
-        call    config_process
+        ; --- CONFIG.SYS の残りを反映する ---
+        ; 数の指定でテーブルを組み直し、DEVICE= を読み込み、INSTALL= を走らせる。
+        call    config_finish
 
         ; --- COMMAND.COM を起動する ---
         jmp     start_shell
@@ -171,6 +163,87 @@ halt_forever:
 .loop:
         hlt
         jmp     .loop
+
+; ---------------------------------------------------------------------------
+; dos_init_tables - DOS の内部テーブルを一式組み立てる
+;   出力: CF=1 ならディスクが読めなかった
+;
+; 起動時に 1 回、DOS=HIGH で HMA へ移ったあとにもう 1 回呼ぶ。構造体の
+; 中には far ポインタがあり、それはどれも「いまの CS」から作られるので、
+; セグメントが変わったら作り直すのが一番確実。
+; ---------------------------------------------------------------------------
+dos_init_tables:
+        push    ax
+        push    cx
+
+        ; デバイスドライバの連鎖。ディスクを触る前に済ませておく。
+        ; ブロックデバイスも連鎖の一員で、セクタ入出力はここを通る。
+        call    dev_init
+
+        ; ディスクバッファ (BUFFERS=)
+        mov     al, DEFAULT_BUFFERS
+        call    buf_init
+
+        ; ドライブの検出と BPB の取り込み
+        call    disk_init
+        jc      .fail
+
+        ; ドライブごとのカレントディレクトリ (CDS)。
+        ; 見つかったドライブが LASTDRIVE より多ければそちらに合わせる。
+        mov     al, DEFAULT_LASTDRIVE
+        cmp     al, [num_drives]
+        jae     .lastdrive_ok
+        mov     al, [num_drives]
+.lastdrive_ok:
+        call    cds_init
+
+        ; ファイルハンドルの土台
+        mov     al, SFT_ENTRIES
+        call    sft_init
+
+        ; List of Lists の各ポインタを実体に向ける
+        call    lol_init
+
+        pop     cx
+        pop     ax
+        clc
+        ret
+.fail:
+        pop     cx
+        pop     ax
+        stc
+        ret
+
+; ---------------------------------------------------------------------------
+; boot_psp_init - カーネル自身の PSP を作る
+;
+; ファイルを開くにはハンドル表 (JFT) が要り、それが載るのは PSP。
+; カーネルもファイルを読む (CONFIG.SYS、デバイスドライバ) ので 1 つ要る。
+; ---------------------------------------------------------------------------
+boot_psp_init:
+        push    ax
+        push    bx
+        push    cx
+        push    dx
+
+        mov     ax, cs
+        mov     bx, boot_psp
+        mov     cl, 4
+        shr     bx, cl
+        add     ax, bx
+        mov     [boot_psp_seg], ax
+        mov     bx, 0xA000              ; 使える上限
+        xor     cx, cx                  ; 親はいない
+        mov     dx, [boot_env_seg]
+        call    build_psp
+        mov     ax, [boot_psp_seg]
+        mov     [cur_psp], ax
+
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        ret
 
 ; ---------------------------------------------------------------------------
 ; start_shell - COMMAND.COM を読み込んで制御を渡す
@@ -576,7 +649,12 @@ int27_handler:
 
 ; INT 2Fh - マルチプレクサ。何も常駐していないので AL=0 を返す
 int2f_handler:
+        cmp     ah, 0x43                ; XMS の窓口
+        je      .xms
         mov     al, 0
+        iret
+.xms:
+        call    xms_int2f
         iret
 
 int_iret:
@@ -691,6 +769,7 @@ int26_handler:
 %include "dirops.inc"
 %include "exec.inc"
 %include "int21.inc"
+%include "xms.inc"
 %include "config.inc"
 
 ; ============================================================================

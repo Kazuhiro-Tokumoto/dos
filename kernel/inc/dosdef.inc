@@ -246,6 +246,7 @@ REQ_COUNT       equ 0x12        ; word: セクタ数 / バイト数
 REQ_START       equ 0x14        ; word: 開始セクタ
 REQ_VOLID       equ 0x16        ; dword
 REQ_STARTL      equ 0x1A        ; dword: 32bit の開始セクタ (65535 超のとき)
+REQ_PACKET_SIZE equ 32         ; 要求ヘッダの最大長
 ; INIT (コマンド 0) の場合
 REQ_INIT_UNITS  equ 0x0D        ; byte: 対応したユニット数
 REQ_INIT_END    equ 0x0E        ; dword: 常駐部分の末尾
