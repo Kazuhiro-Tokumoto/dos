@@ -41,6 +41,7 @@ start:
         call    t_seek
         call    t_find
         call    t_directory
+        call    t_rmdir_nested
         call    t_memory
         call    t_rename
         call    t_delete
@@ -547,6 +548,65 @@ t_diskfree:
 ; ============================================================================
 ; 判定と表示
 ; ============================================================================
+; ---------------------------------------------------------------------------
+; ルート以外にあるディレクトリを消せるか
+;
+; t_directory はルートの直下で作って消しているので、親ディレクトリの
+; クラスタが 0 (ルート) になる。RMDIR の中で親のクラスタを取り違えていても、
+; たまたま 0 と一致して通ってしまう。1 段深いところで試すと、そこが
+; 露見する。中にファイルを作って消してから畳むのは、DELTREE のような
+; プログラムがやる順番に合わせるため。
+; ---------------------------------------------------------------------------
+t_rmdir_nested:
+        mov     si, n_rmnest
+        call    begin
+
+        mov     dx, d_outer
+        mov     ah, 0x39
+        int     0x21
+        jc      fail
+
+        mov     dx, d_inner
+        mov     ah, 0x39
+        int     0x21
+        jc      .drop_outer
+
+        mov     dx, f_nested
+        xor     cx, cx
+        mov     ah, 0x3C
+        int     0x21
+        jc      .drop_inner
+        mov     bx, ax
+        mov     ah, 0x3E
+        int     0x21
+
+        mov     dx, f_nested
+        mov     ah, 0x41
+        int     0x21
+        jc      .drop_inner
+
+        ; 空になった NEST を消す。ここが本題。
+        mov     dx, d_inner
+        mov     ah, 0x3A
+        int     0x21
+        jc      .drop_outer
+
+        mov     dx, d_outer
+        mov     ah, 0x3A
+        int     0x21
+        jc      fail
+        jmp     pass
+
+.drop_inner:
+        mov     dx, d_inner
+        mov     ah, 0x3A
+        int     0x21
+.drop_outer:
+        mov     dx, d_outer
+        mov     ah, 0x3A
+        int     0x21
+        jmp     fail
+
 begin:
         push    si
         mov     si, str_indent
@@ -696,6 +756,10 @@ n_big:          db 'AH=40h/3Fh  3000-byte file across clusters', 0
 n_seek:         db 'AH=42h  seek from end and from start', 0
 n_find:         db 'AH=4Eh/4Fh  FindFirst / FindNext', 0
 n_dir:          db 'AH=39h/3Bh/47h/3Ah  directory create, enter, remove', 0
+n_rmnest:       db 'AH=3Ah  remove a directory that is not in the root', 0
+d_outer:        db 'RMTEST', 0
+d_inner:        db 'RMTEST\\NEST', 0
+f_nested:       db 'RMTEST\\NEST\\F.TXT', 0
 n_mem:          db 'AH=48h/49h/4Ah  memory allocate, resize, free', 0
 n_rename:       db 'AH=56h  rename', 0
 n_delete:       db 'AH=41h  delete', 0

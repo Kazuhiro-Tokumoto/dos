@@ -38,6 +38,7 @@ start:
         call    t_far_cluster
         call    t_two_drives
         call    t_absolute
+        call    t_absread
 
         ; 後始末: カレントドライブを A: に戻す
         mov     ah, 0x0E
@@ -436,6 +437,71 @@ t_absolute:
         jae     fail
         jmp     pass
 
+
+; ---------------------------------------------------------------------------
+; INT 25h - 絶対セクタ読み込み
+;
+; 2 つのことを一度に見ている。
+;
+; 1. 戻り方。この割り込みは iret ではなく retf で返り、INT が積んだ FLAGS を
+;    スタックに残す。呼び出し側が add sp,2 で始末する決まり。DOS 側が
+;    FLAGS を捨てて返ると、この add sp,2 が戻り先アドレスを削り、
+;    ret した瞬間に行方不明になる。
+;
+; 2. 32MB の壁。開始セクタが DX の 16bit しか無いので、この形では
+;    65535 セクタ = 32MB までしか届かない。DOS 4.0 は CX に FFFFh を入れて
+;    「引数はパラメータブロックのほうにある」と伝える形を足した。
+;    C: は 40MB あるので、後ろのほうは拡張形式でしか読めない。
+; ---------------------------------------------------------------------------
+t_absread:
+        mov     si, n_absrd
+        call    begin
+
+        push    ds
+        pop     es
+
+        ; --- 従来形式: C: の先頭セクタ ---
+        mov     word [abs_buf + 0x0B], 0
+        mov     al, 2                   ; 0=A:, 2=C:
+        mov     cx, 1
+        mov     dx, 0
+        mov     bx, abs_buf
+        int     0x25
+        jc      .err                    ; CF は add sp,2 の前に見る
+        add     sp, 2
+        cmp     word [abs_buf + 0x0B], 512      ; BPB のセクタ長
+        jne     fail
+
+        ; --- 拡張形式で同じところを読み直す ---
+        mov     word [abs_buf + 0x0B], 0
+        mov     dword [abs_pkt], 0
+        mov     word [abs_pkt + 4], 1
+        mov     word [abs_pkt + 6], abs_buf
+        mov     [abs_pkt + 8], ds
+        mov     al, 2
+        mov     cx, 0xFFFF
+        mov     bx, abs_pkt
+        int     0x25
+        jc      .err
+        add     sp, 2
+        cmp     word [abs_buf + 0x0B], 512
+        jne     fail
+
+        ; --- 32MB の向こう側 (LBA 70000) ---
+        mov     dword [abs_pkt], 70000
+        mov     word [abs_pkt + 4], 1
+        mov     al, 2
+        mov     cx, 0xFFFF
+        mov     bx, abs_pkt
+        int     0x25
+        jc      .err
+        add     sp, 2
+        jmp     pass
+
+.err:
+        add     sp, 2
+        jmp     fail
+
 ; ============================================================================
 ; 出力まわり
 ; ============================================================================
@@ -584,6 +650,10 @@ n_fat16:     db 'AH=36h  C: is FAT16 (more than 4085 clusters)', 0
 n_round:     db 'file round trip on C: (partition offset applied)', 0
 n_far:       db 'write past the 32MB mark (32-bit cluster to LBA)', 0
 n_two:       db 'C: and D: are usable at the same time', 0
+n_absrd:     db 'INT 25h  absolute read, classic and the >32MB form', 0
+             align 2
+abs_pkt:     times 10 db 0
+abs_buf:     times 512 db 0
 n_dpb:       db 'AH=32h  DPB of C: matches its BPB', 0
 
 f_hdfile:    db 'C:\HDFILE.DAT', 0

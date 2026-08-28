@@ -739,90 +739,96 @@ int_iret:
 ; 余計にスタックを 2 バイト削る。戻り先アドレスが 2 バイトずれるので、
 ; ret した瞬間にどことも知れない場所へ飛ぶ。CHKDSK のように起動直後に
 ; 絶対読み込みを走らせるプログラムは、これで無言のまま行方不明になる。
+;
+; --- 32MB を超えるドライブ (DOS 4.0 以降の拡張形式) ------------------------
+;
+; 開始セクタが DX の 16bit しかないので、この形では 65535 セクタ = 32MB までしか
+; 届かない。DOS 4.0 はそれを越えるドライブのために、CX に FFFFh を入れて
+; 「引数はパラメータブロックのほうに書いてある」と伝える形を足した。
+;
+;       CX     = FFFFh
+;       DS:BX -> +00 DWORD 開始セクタ
+;                +04 WORD  セクタ数
+;                +06 DWORD 転送先 (far ポインタ)
+;
+; ここを見落とすと、FFFFh がそのままセクタ数として渡る。65535 セクタ =
+; 32MB をメモリへ書き込もうとして、そのまま帰ってこない。FreeDOS の
+; CHKDSK が 40MB の C: でバナーの直後に黙るのはこれだった。
 ; ---------------------------------------------------------------------------
+; --- 引数の取り出し (25h / 26h 共通) ---------------------------------------
+;   出力: EAX = 開始セクタ, CX = セクタ数, ES:BX = バッファ, DL = ドライブ,
+;         DS = カーネル
+absio_prep:
+        push    si
+        mov     si, dx                  ; DL を潰す前に開始セクタを逃がす
+        mov     dl, al                  ; DL = ドライブ番号 (0 = A:)
+        cmp     cx, 0xFFFF
+        je      .packet
+
+        ; 従来形式: DX = 開始セクタ (16bit), CX = セクタ数, DS:BX = バッファ
+        push    ds
+        pop     es
+        movzx   eax, si
+        jmp     .done
+
+        ; 拡張形式: DS:BX = 10 バイトのパラメータブロック
+        ;   +00 DWORD 開始セクタ
+        ;   +04 WORD  セクタ数
+        ;   +06 DWORD 転送先 (far ポインタ)
+.packet:
+        mov     si, bx
+        mov     eax, [si]
+        mov     cx, [si + 4]
+        les     bx, [si + 6]
+.done:
+        push    ax
+        mov     ax, cs
+        mov     ds, ax
+        pop     ax
+        pop     si
+        ret
+
 int25_handler:
         push    ax
+        push    bx
         push    cx
         push    dx
         push    si
         push    di
         push    es
         push    ds
-
-        push    ds
-        pop     es                      ; ES:BX = バッファ
-        movzx   si, al                  ; SI = ドライブ番号 (0 = A:)
-        movzx   eax, dx                 ; EAX = 開始 LBA
-        mov     dx, si                  ; DL = ドライブ番号
-        push    ds
-        mov     si, cs
-        mov     ds, si
-        pop     si                      ; SI = 呼び出し元の DS (使わないが退避)
+        call    absio_prep
         call    disk_read
-        jc      .fail
+        jmp     absio_ret
 
+int26_handler:
+        push    ax
+        push    bx
+        push    cx
+        push    dx
+        push    si
+        push    di
+        push    es
+        push    ds
+        call    absio_prep
+        call    disk_write
+        ; そのまま下へ
+
+absio_ret:
         pop     ds
         pop     es
         pop     di
         pop     si
         pop     dx
         pop     cx
+        pop     bx
         pop     ax
+        jc      .fail                   ; pop はフラグを変えない
         xor     ax, ax
         clc
         retf                            ; FLAGS はスタックに残したまま返る
 .fail:
-        pop     ds
-        pop     es
-        pop     di
-        pop     si
-        pop     dx
-        pop     cx
-        pop     ax
-        mov     ax, 0x0C04              ; 一般的な読み取りエラー
-        stc
-        retf
-
-int26_handler:
-        push    ax
-        push    cx
-        push    dx
-        push    si
-        push    di
-        push    es
-        push    ds
-
-        push    ds
-        pop     es
-        movzx   si, al                  ; SI = ドライブ番号
-        movzx   eax, dx                 ; EAX = 開始 LBA
-        mov     dx, si                  ; DL = ドライブ番号
-        push    ds
-        mov     si, cs
-        mov     ds, si
-        pop     si
-        call    disk_write
-        jc      .fail
-
-        pop     ds
-        pop     es
-        pop     di
-        pop     si
-        pop     dx
-        pop     cx
-        pop     ax
-        xor     ax, ax
-        clc
-        retf
-.fail:
-        pop     ds
-        pop     es
-        pop     di
-        pop     si
-        pop     dx
-        pop     cx
-        pop     ax
-        mov     ax, 0x0C04
+        mov     ax, 0x0C04              ; 一般的な読み書きエラー
         stc
         retf
 

@@ -207,6 +207,15 @@ dir_rmdir:
         jc      .not_empty
 
         ; もう一度エントリを引き直す (dir_buf を上書きしたため)
+        ;
+        ; 探す場所は「親ディレクトリ」。ここで AX を入れ直さないと、
+        ; .is_empty が最後に触った値 — 消そうとしているディレクトリ自身の
+        ; クラスタ — がそのまま残っていて、自分の中から自分の名前を探す
+        ; ことになる。当然見つからず、エラー 3 (パスが見つからない) が返る。
+        ; 小さなディスクでは .is_empty の出口でたまたま AX の上位が 0 に
+        ; なることがあり、その場合だけルートを探しに行って正しく動いて
+        ; しまうので、症状が出たり出なかったりしていた。
+        mov     ax, [.pardir]
         push    si
         mov     si, name83
         mov     cl, ATTR_DIRECTORY
@@ -232,7 +241,9 @@ dir_rmdir:
         jmp     .out
 
 ; 対象のディレクトリが空かどうか。CF=0 なら空
+; (AX も含めて呼び出し側のレジスタは壊さない)
 .is_empty:
+        push    ax
         push    bx
         push    cx
         push    di
@@ -260,12 +271,14 @@ dir_rmdir:
         pop     di
         pop     cx
         pop     bx
+        pop     ax
         clc
         ret
 .not_empty_i:
         pop     di
         pop     cx
         pop     bx
+        pop     ax
         stc
         ret
 

@@ -22,6 +22,12 @@ import sys
 
 SECTOR = 512
 
+# ボリュームラベルに入れる日時。MS-DOS 6.22 が世に出た 1994 年 6 月 1 日
+# 正午にしてある。FAT の日付は 15-9bit が 1980 年からの年、8-5bit が月、
+# 4-0bit が日。時刻は 15-11bit が時、10-5bit が分、4-0bit が秒の 1/2。
+FAT_DATE = ((1994 - 1980) << 9) | (6 << 5) | 1          # 0x1CC1
+FAT_TIME = (12 << 11) | (0 << 5) | 0                    # 0x6000
+
 
 class BPB:
     """ブートセクタの先頭 62 バイトから BPB を読み出す。"""
@@ -124,10 +130,19 @@ def build(stage1_path, stage2_path, out_path, quiet=False):
 
     # --- ルートディレクトリにボリュームラベルを置く ---
     # 属性 0x08 (ボリュームラベル)。DIR や mdir がラベルを拾えるようになる。
+    #
+    # 日時の欄は 0 のままにしてはいけない。ボリュームラベルもディレクトリ
+    # エントリの一種なので、ディスクを検査するプログラムはここも日付として
+    # 読む。0 は月 0 日 0 という存在しない日付になり、FreeDOS の CHKDSK は
+    # 「\MYDOS has an invalid last write date (00/00)」と言ってエラー扱いする。
+    # 日付は毎回同じにしてある。ビルドのたびにイメージが変わると、
+    # 「どこが壊れたか」をバイト単位で比べる調べ方が使えなくなるため。
     label = stage1[0x2B:0x36]  # 拡張 BPB のラベルをそのまま使う
     entry = bytearray(32)
     entry[0:11] = label
     entry[11] = 0x08
+    entry[22:24] = FAT_TIME.to_bytes(2, 'little')   # 最終更新時刻
+    entry[24:26] = FAT_DATE.to_bytes(2, 'little')   # 最終更新日
     img[bpb.root_lba * SECTOR : bpb.root_lba * SECTOR + 32] = entry
 
     with open(out_path, "wb") as f:

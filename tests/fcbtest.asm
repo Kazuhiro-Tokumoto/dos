@@ -77,6 +77,8 @@ start:
         call    t_truename
         call    t_vollabel
         call    t_fcb_drive
+        call    t_fcb_device
+        call    t_fcb_label
 
         call    newline
         mov     si, msg_result
@@ -1119,6 +1121,84 @@ fcb_try_open:
         pop     ax
         ret
 
+; ---------------------------------------------------------------------------
+; FCB で文字デバイスを開けるか
+;
+; ハンドルが入る前の DOS 1.x では、これが唯一のデバイスの開き方だった。
+; 当時の作法を引きずったプログラムは今でもここを通ってくる。
+; FreeDOS の LABEL は起動直後に FCB で CON を開き、失敗すると
+; 「Not a valid drive」と言って何もせずに終わる。
+; ---------------------------------------------------------------------------
+t_fcb_device:
+        mov     si, n_fcbdev
+        call    begin
+
+        mov     dx, con_fcb
+        mov     ah, 0x0F
+        int     0x21
+        cmp     al, 0
+        jne     fail
+
+        mov     dx, con_fcb
+        mov     ah, 0x10                ; 閉じる
+        int     0x21
+        jmp     pass
+
+; ---------------------------------------------------------------------------
+; 拡張 FCB の属性が、削除と作成で効いているか
+;
+; 属性 8 (ボリュームラベル) を立てた拡張 FCB に '???????????' を入れて
+; AH=13h を呼ぶ、というのが LABEL のラベル張り替えの手順。属性を見ずに
+; 名前だけで消すと、ディスクの中身が全部消える。実際そうなっていた。
+; ここでは「ラベルを消す → 普通のファイルが残っている → ラベルを作り直す」
+; までを通しで確かめる。
+; ---------------------------------------------------------------------------
+t_fcb_label:
+        mov     si, n_fcblbl
+        call    begin
+
+        ; (1) 属性 8 の拡張 FCB でワイルドカード削除
+        mov     dx, del_lbl_fcb
+        mov     ah, 0x13
+        int     0x21
+        cmp     al, 0
+        jne     fail                    ; ラベルが消せていない
+
+        ; (2) 普通のファイルは生き残っていること
+        mov     si, f_readme
+        call    fcb_try_open
+        jc      fail
+
+        ; (3) 属性 8 の拡張 FCB でラベルを作り直す
+        mov     dx, new_lbl_fcb
+        mov     ah, 0x16
+        int     0x21
+        cmp     al, 0
+        jne     fail
+        mov     dx, new_lbl_fcb
+        mov     ah, 0x10
+        int     0x21
+
+        ; (4) 作ったものがちゃんと属性 8 になっていること
+        push    ds
+        pop     es
+        mov     ah, 0x1A
+        mov     dx, vol_dta
+        int     0x21
+        mov     ah, 0x11
+        mov     dx, vol_fcb
+        int     0x21
+        push    ax
+        mov     ah, 0x1A                ; DTA を戻す
+        mov     dx, dta_buf
+        int     0x21
+        pop     ax
+        cmp     al, 0
+        jne     fail
+        cmp     byte [vol_dta + 6], ATTR_VOLUME
+        jne     fail
+        jmp     pass
+
 begin:
         push    si
         mov     si, str_indent
@@ -1250,6 +1330,21 @@ pat_all:     db '*.*', 0
 defdta_ok:   db 0
              align 2
 n_fcbdrv:    db 'FCB[0] selects the drive, 1 = A:', 0
+n_fcbdev:    db 'AH=0Fh  an FCB can open a character device (CON)', 0
+n_fcblbl:    db 'AH=13h/16h  an extended FCB acts on the attribute it names', 0
+con_fcb:     db 0, 'CON        '
+             times 25 db 0
+f_readme:    db 0, 'README  TXT'
+             times 25 db 0
+; 属性 8 + 名前は全部ワイルドカード = 「ボリュームラベルを消せ」
+del_lbl_fcb: db 0xFF, 0, 0, 0, 0, 0
+             db ATTR_VOLUME
+             db 0, '???????????'
+             times 25 db 0
+new_lbl_fcb: db 0xFF, 0, 0, 0, 0, 0
+             db ATTR_VOLUME
+             db 0, 'MYDOS      '
+             times 25 db 0
 f_hello_a:   db 1, 'HELLO   COM'
              times 25 db 0
 f_hello_c:   db 3, 'HELLO   COM'

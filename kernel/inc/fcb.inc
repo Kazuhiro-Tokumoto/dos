@@ -121,6 +121,86 @@ fcb_name83:
         pop     ax
         ret
 
+
+%ifdef FCB_TRACE
+; 調査用: AH=0Fh に渡された FCB の中身をシリアルへ出す
+fcb_trace_dump:
+        pusha
+        push    ds
+        push    cs
+        pop     ds
+        mov     al, '{'
+        call    trace_putc
+        mov     al, [fcb_extended]
+        add     al, '0'
+        call    trace_putc
+        mov     al, [fcb_attr]
+        call    trace_hexd
+        mov     al, ' '
+        call    trace_putc
+        mov     al, [es:di + FCB_DRIVE]
+        call    trace_hexd
+        mov     al, ':'
+        call    trace_putc
+        mov     cx, 11
+        mov     si, di
+        inc     si
+.d:
+        mov     al, [es:si]
+        call    trace_putc
+        inc     si
+        loop    .d
+        mov     al, '}'
+        call    trace_putc
+        pop     ds
+        popa
+        ret
+%endif
+
+; ---------------------------------------------------------------------------
+; fcb_devname - name83 (8.3 の空白詰め) を 0 終端の名前に直す
+;   出力: fcb_devbuf = "CON" のような形
+;
+; dev_check はパス文字列を受け取るので、FCB の 11 バイト固定の形のままでは
+; 渡せない。後ろの空白を落として、拡張子があれば '.' で繋ぐ。
+; ---------------------------------------------------------------------------
+fcb_devname:
+        push    ax
+        push    cx
+        push    si
+        push    di
+        push    es
+        push    ds
+        pop     es
+        mov     si, name83
+        mov     di, fcb_devbuf
+        mov     cx, 8
+        call    .copy_trim
+        mov     si, name83 + 8
+        mov     cx, 3
+        cmp     byte [si], ' '
+        je      .no_ext
+        mov     al, '.'
+        stosb
+        call    .copy_trim
+.no_ext:
+        xor     al, al
+        stosb
+        pop     es
+        pop     di
+        pop     si
+        pop     cx
+        pop     ax
+        ret
+.copy_trim:
+        lodsb
+        cmp     al, ' '
+        je      .skip
+        stosb
+.skip:
+        loop    .copy_trim
+        ret
+
 ; ---------------------------------------------------------------------------
 ; fcb_select - FCB の先頭 1 バイトにあるドライブ番号を選ぶ
 ;   入力: ES:DI = FCB
@@ -346,6 +426,10 @@ fcb_fill_open:
         mov     ax, [si + SFT_SIZE + 2]
         mov     [es:di + FCB_FILESIZE + 2], ax
 
+        ; 文字デバイスにはディレクトリエントリが無いので日時は入れない
+        test    word [si + SFT_DEVINFO], SFTI_CHAR
+        jnz     .device_stamp
+
         ; 日時はディレクトリエントリを読み直して入れる
         push    bx
         push    cx
@@ -373,6 +457,7 @@ fcb_fill_open:
 .no_stamp:
         pop     cx
         pop     bx
+.device_stamp:
 
         pop     si
         pop     di
@@ -395,6 +480,28 @@ fcb_open_by_name:
         push    ds
         pop     es
 
+        ; --- まず文字デバイスかどうか ---
+        ; FCB でも CON や PRN は開ける。ハンドルが入る前の DOS 1.x では
+        ; これが唯一のデバイスの開き方だったので、当時の作法を引きずった
+        ; プログラムは今でもここを通ってくる。FreeDOS の LABEL は
+        ; 起動直後に FCB で CON を開き、失敗すると「Not a valid drive」と
+        ; 言って終わる。ドライブの話にしか見えないが、原因はここだった。
+        call    fcb_devname
+        push    si
+        mov     si, fcb_devbuf
+        call    dev_check
+        pop     si
+        jc      .as_file
+
+        mov     [.dev], al
+        call    sft_alloc
+        jc      .not_found
+        mov     al, [.dev]
+        call    sft_bind_kind
+        mov     word [si + SFT_MODE], OPEN_RDWR
+        jmp     .have_sft
+
+.as_file:
         call    fcb_dirclus
         push    si
         mov     si, name83
@@ -412,6 +519,7 @@ fcb_open_by_name:
         mov     word [si + SFT_MODE], OPEN_RDWR
         call    sft_bind_file
 
+.have_sft:
         ; SFT 番号を求め直す
         mov     ax, si
         sub     ax, sft_table
@@ -433,6 +541,7 @@ fcb_open_by_name:
         pop     bx
         stc
         ret
+.dev:   db 0
 
 ; ---------------------------------------------------------------------------
 ; fcb_result - AL を戻り値として設定する
@@ -446,6 +555,9 @@ fcb_result:
 ; ===========================================================================
 f_0F:
         call    fcb_get
+%ifdef FCB_TRACE
+        call    fcb_trace_dump
+%endif
         call    fcb_name83
         call    fcb_open_by_name
         jc      .fail
@@ -653,7 +765,7 @@ f_13:
         call    fcb_dirclus
         push    si
         mov     si, name83
-        mov     cl, 0
+        mov     cl, [fcb_attr]                  ; 拡張 FCB で指定された属性
         call    dir_find
         pop     si
         pop     bx
@@ -733,7 +845,7 @@ f_16:
         call    fcb_dirclus
         push    si
         mov     si, name83
-        mov     cl, 0
+        mov     cl, [fcb_attr]                  ; 拡張 FCB で指定された属性
         call    dir_find
         pop     si
         jnc     .truncate
@@ -752,7 +864,15 @@ f_16:
         pop     es
         pop     di
         pop     si
-        mov     byte [di + DIR_ATTR], ATTR_ARCHIVE
+        ; 拡張 FCB なら指定された属性で作る。ボリュームラベルを作れるのは
+        ; この道だけで、ここを ATTR_ARCHIVE 固定にすると LABEL が
+        ; 「ラベルのつもりで普通のファイル」を作ってしまう。
+        mov     al, [fcb_attr]
+        test    al, al
+        jnz     .use_attr
+        mov     al, ATTR_ARCHIVE
+.use_attr:
+        mov     [di + DIR_ATTR], al
         jmp     .init
 
 .truncate:
@@ -1384,5 +1504,6 @@ fcb_attr:       db 0
 fcb_extended:   db 0
 fcb_find_dir:   dw 0
 fcb_find_drive: db 0            ; 検索を始めたドライブ (AH=12h が引き継ぐ)
+fcb_devbuf:     times 13 db 0   ; デバイス名の判定に使う 0 終端の名前
 fcb_find_idx:   dw 0
 fcb_find_pat:   times 11 db 0
