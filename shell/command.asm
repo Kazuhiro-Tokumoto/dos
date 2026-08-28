@@ -618,15 +618,73 @@ cmd_ver:
         ret
 
 ; --- ECHO ------------------------------------------------------------------
+; --- ECHO ------------------------------------------------------------------
+;
+; 引数なしなら今の状態を答える。ON / OFF なら状態を変える。それ以外は
+; そのまま出す。バッチの中で「実行する行を見せるかどうか」がこの状態で
+; 決まるので、ただの表示コマンドではない。
 cmd_echo:
         cmp     byte [si], 0
         jne     .text
+        cmp     byte [echo_on], 0
+        je      .say_off
         mov     si, msg_echo_on
         call    puts
         ret
+.say_off:
+        mov     si, msg_echo_off
+        call    puts
+        ret
 .text:
+        push    si
+        mov     di, str_on
+        call    stricmp_z
+        pop     si
+        je      .set_on
+        push    si
+        mov     di, str_off
+        call    stricmp_z
+        pop     si
+        je      .set_off
         call    puts
         call    newline
+        ret
+.set_on:
+        mov     byte [echo_on], 1
+        ret
+.set_off:
+        mov     byte [echo_on], 0
+        ret
+
+; --- 大小を区別せずに 0 終端の 2 つを比べる (ZF=1 なら同じ) ---
+stricmp_z:
+        push    ax
+        push    si
+        push    di
+.loop:
+        mov     al, [si]
+        call    upcase_al
+        mov     ah, [di]
+        cmp     al, ah
+        jne     .out
+        test    al, al
+        jz      .out
+        inc     si
+        inc     di
+        jmp     .loop
+.out:
+        pop     di
+        pop     si
+        pop     ax
+        ret
+
+upcase_al:
+        cmp     al, 'a'
+        jb      .out
+        cmp     al, 'z'
+        ja      .out
+        sub     al, 0x20
+.out:
         ret
 
 ; --- EXIT ------------------------------------------------------------------
@@ -1390,6 +1448,14 @@ run_external:
 
 ; --- 起動時に AUTOEXEC.BAT があれば実行する ---
 run_autoexec:
+        ; ドライブ文字は決め打ちにしない。起動したドライブに置かれた
+        ; AUTOEXEC.BAT を読む。ハードディスクに入れた MYDOS は C: から
+        ; 立ち上がるので、A: 固定だと自分の AUTOEXEC.BAT が読まれない。
+        mov     ah, 0x19
+        int     0x21
+        add     al, 'A'
+        mov     [str_autoexec], al
+
         mov     si, str_autoexec
         mov     di, prog_path
         call    strcpy
@@ -1458,6 +1524,7 @@ run_batch:
         pop     cx
 .done:
         mov     byte [bat_active], 0
+        mov     byte [echo_on], 1       ; 対話に戻るので元に戻す
 .nested:
         ret
 
@@ -1473,7 +1540,9 @@ batch_line:
         cmp     al, '@'
         je      .quiet
 
-        ; DOS の ECHO ON と同じで、実行する行をそのまま見せる
+        ; ECHO が ON のときだけ、実行する行をそのまま見せる
+        cmp     byte [echo_on], 0
+        je      .exec
         push    si
         call    show_prompt
         pop     si
@@ -2094,6 +2163,11 @@ msg_copied:     db '        1 file(s) copied', 13, 10, 0
 msg_bad_command:db 'Bad command or file name', 13, 10, 0
 msg_exec_fail:  db 'Unable to execute program', 13, 10, 0
 msg_echo_on:    db 'ECHO is on', 13, 10, 0
+msg_echo_off:   db 'ECHO is off', 13, 10, 0
+str_on:         db 'ON', 0
+str_off:        db 'OFF', 0
+id_echo_on:
+echo_on:        db 1
 msg_date:       db 'Current date is ', 0
 msg_time:       db 'Current time is ', 0
 msg_mem_head:   db 13, 10, 'Segment      Size  Owner', 13, 10

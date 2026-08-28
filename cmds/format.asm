@@ -55,6 +55,8 @@ start:
         call    pick_layout
         jc      .bad_media
 
+        call    classify_fat
+
         call    confirm
         jc      .aborted
 
@@ -153,7 +155,12 @@ parse_cmdline:
         je      .opt_s
         cmp     al, 'V'
         je      .opt_v
+        cmp     al, 'Q'
+        je      .opt_q
         jmp     .bad
+.opt_q:
+        mov     byte [opt_quiet], 1
+        jmp     .opts
 .opt_s:
         mov     byte [opt_sys], 1
         jmp     .opts
@@ -389,9 +396,57 @@ pick_layout:
         ret
 
 ; ============================================================================
+; classify_fat - クラスタ数から FAT12 か FAT16 かを決める
+;
+; 決め手はクラスタの数だけで、ブートセクタに書く "FAT12   " の文字列は
+; ただの飾り。とはいえ嘘を書くと、その文字列を見て判断する道具
+; (mtools など) がディスクを読めなくなる。
+; ============================================================================
+classify_fat:
+        push    eax
+        push    ebx
+        push    edx
+        mov     eax, [g_total]
+        movzx   ebx, word [b_reserved]
+        sub     eax, ebx
+        movzx   ebx, word [b_secperfat]
+        shl     ebx, 1
+        sub     eax, ebx
+        movzx   ebx, word [b_rootent]
+        add     ebx, 15
+        shr     ebx, 4
+        sub     eax, ebx
+        xor     edx, edx
+        movzx   ebx, word [b_secperclus]
+        div     ebx                     ; EAX = クラスタ数
+        cmp     eax, 4085
+        jb      .fat12
+        mov     byte [is_fat16], 1
+        mov     dword [fs_type], 'FAT1'
+        mov     dword [fs_type + 4], '6   '
+        jmp     .out
+.fat12:
+        mov     byte [is_fat16], 0
+        mov     dword [fs_type], 'FAT1'
+        mov     dword [fs_type + 4], '2   '
+.out:
+        pop     edx
+        pop     ebx
+        pop     eax
+        ret
+
+; ============================================================================
 ; 確認を取る
 ; ============================================================================
 confirm:
+        ; /Q は「もう聞いた」の意味。SETUP から呼ばれるときに使う。
+        ; 呼ぶ側が先に確認を取っているので、ここで二度聞くと、
+        ; 流し込んだ答えが 1 つずれて噛み合わなくなる。
+        cmp     byte [opt_quiet], 0
+        je      .ask
+        clc
+        ret
+.ask:
         mov     al, [dos_drive]
         add     al, 'A'
         mov     [msg_drive], al
@@ -572,6 +627,13 @@ write_fats:
         mov     [secbuf], al
         mov     byte [secbuf + 1], 0xFF
         mov     byte [secbuf + 2], 0xFF
+        ; FAT16 は 1 エントリ 16bit なので、クラスタ 1 の終端印は
+        ; もう 1 バイト要る。FAT12 のつもりで 3 バイトだけ書くと、
+        ; クラスタ 1 が 00FFh という中途半端な値になる。
+        cmp     byte [is_fat16], 0
+        je      .head_done
+        mov     byte [secbuf + 3], 0xFF
+.head_done:
 
         ; この FAT の先頭 LBA
         movzx   eax, word [.fat]
@@ -964,8 +1026,9 @@ nonsys_end:
 ; ============================================================================
 ; データ
 ; ============================================================================
-msg_usage:    db 'FORMAT d: [/S] [/V:label]', 13, 10
+msg_usage:    db 'FORMAT d: [/S] [/Q] [/V:label]', 13, 10
               db '  /S       make the disk bootable afterwards (runs SYS)', 13, 10
+              db '  /Q       do not ask for confirmation (the caller already did)', 13, 10
               db '  /V:name  set the volume label', 13, 10, '$'
 msg_no_drive: db 'FORMAT: cannot work out the layout of that drive', 13, 10
               db '  A hard disk partition must already carry a BPB (FDISK first).', 13, 10, '$'
@@ -984,6 +1047,7 @@ msg_no_boot:  db 'Note: a 720KB disk cannot hold the MYDOS boot loader.', 13, 10
 msg_no_sys:   db 'FORMAT: could not run SYS.COM', 13, 10, '$'
 
 oem_name:     db 'MYDOS1.0'
+is_fat16:     db 0
 fs_type:      db 'FAT12   '
 vol_label:    db '           '         ; 11 バイト (既定は空白)
 
@@ -1001,6 +1065,7 @@ epb_fcb2:     dd 0
 dos_drive:    db 0
 bios_drive:   db 0
 opt_sys:      db 0
+opt_quiet:    db 0
 is_floppy:    db 1
 answer:       db 0
 

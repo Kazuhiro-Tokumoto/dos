@@ -42,9 +42,8 @@ C:
 DIR
 A:
 ECHO after XMS block move
-REM ハードディスクにも入れてみる。MBR を書き、区画を作り直し、
-REM システムを移す。テストの最後にこのディスクから起動する。
-FDISK /MBR
-FORMAT C: /V:MYDOSHD < YES.TXT
-SYS C:
+REM ハードディスクにも入れてみる。SETUP が FDISK / FORMAT / SYS を
+REM 順に呼び、CONFIG.SYS と AUTOEXEC.BAT も書き下ろす。
+REM テストの最後にこのディスクから起動する。
+SETUP C: < YES.TXT
 DOSTEST

@@ -44,7 +44,8 @@ PROGS := $(BUILD)/hello.com $(BUILD)/hello.exe $(BUILD)/dostest.com \
          $(BUILD)/lfntest.com $(BUILD)/pipetest.com \
          $(BUILD)/emstest.com \
          $(BUILD)/ovl.ovl $(BUILD)/mydev.sys $(BUILD)/ramdisk.sys \
-         $(BUILD)/emm386.sys $(BUILD)/format.com $(BUILD)/sys.com $(BUILD)/fdisk.com
+         $(BUILD)/emm386.sys $(BUILD)/format.com $(BUILD)/sys.com $(BUILD)/fdisk.com \
+         $(BUILD)/setup.com
 
 KDEPS := kernel/io.asm $(wildcard $(INCDIR)/*.inc)
 
@@ -137,6 +138,7 @@ define make_image
 	$(MCOPY) -i $(1) -o $(BUILD)/format.com ::FORMAT.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/sys.com ::SYS.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/fdisk.com ::FDISK.COM
+	$(MCOPY) -i $(1) -o $(BUILD)/setup.com ::SETUP.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/emstest.com ::EMSTEST.COM
 	$(MCOPY) -i $(1) -o tests/config.sys ::CONFIG.SYS
 	$(MCOPY) -i $(1) -o $(BUILD)/ovl.ovl ::OVL.OVL

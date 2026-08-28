@@ -47,6 +47,7 @@ REQUIRED = [
     ("System transferred", "SYS がブートローダとシステムファイルを移す"),
     ("Directory of B:\\", "DIR がドライブ指定を見る"),
     ("Master boot record written.", "FDISK がマスターブートレコードを書く"),
+    ("Setup is finished.", "SETUP がハードディスクに MYDOS を入れる"),
 ]
 
 # XMSTEST / CFGTEST / HDTEST / DOSINT / FCBTEST / DOSTEST / ENVTEST の
@@ -149,7 +150,7 @@ def run(image, timeout, qemu, keep_log, hd, fdb=None,
             return rc
     if verify_hd:
         rc = boot_check(verify_hd, qemu, timeout, "-hda", "c",
-                        "FDISK + FORMAT + SYS で入れたハードディスク")
+                        "SETUP で入れたハードディスク")
         if rc:
             return rc
 
