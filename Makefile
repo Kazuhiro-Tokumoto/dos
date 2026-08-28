@@ -27,6 +27,7 @@ DBGFLAGS  := $(KFLAGS) -DSERIAL_CONSOLE
 IMG     := $(BUILD)/dos.img
 IMG_DBG := $(BUILD)/dos-debug.img
 HDIMG   := $(BUILD)/hd.img
+FDBIMG  := $(BUILD)/blank.img
 
 STAGE1  := $(BUILD)/stage1.bin
 STAGE2  := $(BUILD)/stage2.bin
@@ -42,7 +43,7 @@ PROGS := $(BUILD)/hello.com $(BUILD)/hello.exe $(BUILD)/dostest.com \
          $(BUILD)/lfntest.com $(BUILD)/pipetest.com \
          $(BUILD)/emstest.com \
          $(BUILD)/ovl.ovl $(BUILD)/mydev.sys $(BUILD)/ramdisk.sys \
-         $(BUILD)/emm386.sys
+         $(BUILD)/emm386.sys $(BUILD)/format.com $(BUILD)/sys.com
 
 KDEPS := kernel/io.asm $(wildcard $(INCDIR)/*.inc)
 
@@ -84,6 +85,10 @@ $(BUILD)/hello.exe: tests/hellox.asm tools/mkexe.py | $(BUILD)
 $(BUILD)/%.sys: tests/%.asm | $(BUILD)
 	$(NASM) $(NASMFLAGS) $< -o $@
 
+# 外部コマンド。DOS 本体ではなく、ディスクに置かれる普通のプログラム。
+$(BUILD)/%.com: cmds/%.asm | $(BUILD)
+	$(NASM) $(NASMFLAGS) $< -o $@
+
 # 実用のドライバ。EMM386.SYS は EMS (INT 67h) を提供する。
 $(BUILD)/%.sys: drivers/%.asm | $(BUILD)
 	$(NASM) $(NASMFLAGS) $< -o $@
@@ -120,15 +125,18 @@ define make_image
 	$(MCOPY) -i $(1) -o $(BUILD)/mydev.sys ::MYDEV.SYS
 	$(MCOPY) -i $(1) -o $(BUILD)/ramdisk.sys ::RAMDISK.SYS
 	$(MCOPY) -i $(1) -o $(BUILD)/emm386.sys ::EMM386.SYS
+	$(MCOPY) -i $(1) -o $(BUILD)/format.com ::FORMAT.COM
+	$(MCOPY) -i $(1) -o $(BUILD)/sys.com ::SYS.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/emstest.com ::EMSTEST.COM
 	$(MCOPY) -i $(1) -o tests/config.sys ::CONFIG.SYS
 	$(MCOPY) -i $(1) -o $(BUILD)/ovl.ovl ::OVL.OVL
 	$(MCOPY) -i $(1) -o tests/readme.txt ::README.TXT
+	$(MCOPY) -i $(1) -o tests/yes.txt ::YES.TXT
 	$(MCOPY) -i $(1) -o tests/longname.txt "::My Long File Name.txt"
 	$(MCOPY) -i $(1) -o $(3) ::AUTOEXEC.BAT
 endef
 
-IMGDEPS := $(STAGE1) $(STAGE2) $(SHELL_COM) $(PROGS) tests/readme.txt tests/config.sys
+IMGDEPS := $(STAGE1) $(STAGE2) $(SHELL_COM) $(PROGS) tests/readme.txt tests/config.sys tests/yes.txt
 
 $(IMG): $(KERNEL) $(IMGDEPS) tests/autoexec.bat
 	$(call make_image,$@,$(KERNEL),tests/autoexec.bat)
@@ -168,7 +176,10 @@ test: $(IMG_DBG) $(BUILD)/envtest.com
 	rm -f $(HDIMG)
 	$(PYTHON) tools/mkhd.py $(HDIMG)
 	$(call hd_populate,$(HDIMG))
-	$(PYTHON) tools/runtest.py $(IMG_DBG) --hd $(HDIMG)
+	rm -f $(FDBIMG)
+	mformat -C -f 1440 -v OLDDISK -i $(FDBIMG) ::
+	$(PYTHON) tools/runtest.py $(IMG_DBG) --hd $(HDIMG) \
+	    --fdb $(FDBIMG) --verify-boot $(FDBIMG)
 
 # 参照実装 (js/) の回帰テスト。node があるときだけ動く。
 js-test:

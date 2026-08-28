@@ -43,6 +43,9 @@ REQUIRED = [
     ("PIPE-GOT: MYDOS", "COMMAND.COM の | と < でハンドルが差し替わる"),
     ("after XMS block move", "XMS のブロック転送のあとでもハードディスクを触れる"),
     ("EMM386.SYS installed", "CONFIG.SYS の DEVICE= が EMS ドライバを組み込む"),
+    ("Format complete.", "FORMAT が別のフロッピーを FAT12 で作り直す"),
+    ("System transferred", "SYS がブートローダとシステムファイルを移す"),
+    ("Directory of B:\\", "DIR がドライブ指定を見る"),
 ]
 
 # XMSTEST / CFGTEST / HDTEST / DOSINT / FCBTEST / DOSTEST / ENVTEST の
@@ -50,8 +53,11 @@ REQUIRED = [
 # ENVTEST は A: と C: の両方から走らせるので、集計行は 9 本ぶん出る。
 EXPECTED_SUITES = 10
 
+# 作ったディスクから起動できたと判断する目印
+BOOT_MARKER = "MYDOS Command Interpreter"
 
-def run(image, timeout, qemu, keep_log, hd):
+
+def run(image, timeout, qemu, keep_log, hd, fdb=None, verify_boot=None):
     log_path = os.path.join(os.path.dirname(image) or ".", "serial.log")
     if os.path.exists(log_path):
         os.remove(log_path)
@@ -68,6 +74,10 @@ def run(image, timeout, qemu, keep_log, hd):
         # パーティションを切った FAT16 のハードディスク。
         # MYDOS はフロッピーから起動し、こちらは C: / D: として見えるはず。
         cmd += ["-hda", hd]
+    if fdb:
+        # 2 台目のフロッピー。MYDOS 以外の道具で作った普通の FAT12 で、
+        # テストの中で FORMAT と SYS を掛けて起動できるようにする。
+        cmd += ["-fdb", fdb]
     print("$ " + " ".join(cmd))
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
@@ -130,7 +140,57 @@ def run(image, timeout, qemu, keep_log, hd):
               f"出力の確認 {len(REQUIRED) - len(missing)}/{len(REQUIRED)} 件")
         return 1
 
+    if verify_boot:
+        rc = boot_check(verify_boot, qemu, timeout)
+        if rc:
+            return rc
+
     print(f"\n判定: 成功 — DOSTEST {npass} 件 + 出力の確認 {len(REQUIRED)} 件、すべて成功")
+    return 0
+
+
+def boot_check(image, qemu, timeout):
+    """MYDOS 自身が FORMAT + SYS で作ったディスクから、本当に起動できるか。
+
+    テストの中で作られた 2 台目のフロッピーを、今度は 1 台目として起動する。
+    ブートセクタ・Stage2・IO.SYS・COMMAND.COM が揃って初めてここまで来る。
+    """
+    log_path = os.path.join(os.path.dirname(image) or ".", "bootcheck.log")
+    if os.path.exists(log_path):
+        os.remove(log_path)
+    cmd = [qemu, "-fda", image, "-boot", "a", "-display", "none",
+           "-no-reboot", "-serial", f"file:{log_path}"]
+    print("\n--- MYDOS が作ったディスクから起動してみる ---")
+    print("$ " + " ".join(cmd))
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    deadline = time.time() + min(timeout, 60)
+    text = ""
+    try:
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                break
+            if os.path.exists(log_path):
+                with open(log_path, "rb") as f:
+                    text = f.read().decode("latin-1")
+                if BOOT_MARKER in text:
+                    break
+            time.sleep(0.25)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+    if os.path.exists(log_path):
+        with open(log_path, "rb") as f:
+            text = f.read().decode("latin-1")
+        os.remove(log_path)
+    print(text.replace("\r\n", "\n").rstrip())
+    if BOOT_MARKER not in text:
+        print("\n判定: 失敗 — FORMAT と SYS で作ったディスクから起動できなかった")
+        return 1
+    print("  [PASS] FORMAT + SYS で作ったディスクが起動する")
     return 0
 
 
@@ -141,8 +201,12 @@ def main():
     ap.add_argument("--qemu", default="qemu-system-i386")
     ap.add_argument("--keep-log", action="store_true")
     ap.add_argument("--hd", help="ハードディスクのイメージ (C: / D: になる)")
+    ap.add_argument("--fdb", help="2 台目のフロッピー (B: になる)")
+    ap.add_argument("--verify-boot",
+                    help="テストのあと、このイメージから起動できるか確かめる")
     args = ap.parse_args()
-    sys.exit(run(args.image, args.timeout, args.qemu, args.keep_log, args.hd))
+    sys.exit(run(args.image, args.timeout, args.qemu, args.keep_log, args.hd,
+                 args.fdb, args.verify_boot))
 
 
 if __name__ == "__main__":

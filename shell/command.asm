@@ -1950,10 +1950,53 @@ put_hex16:
 ; ---------------------------------------------------------------------------
 ; show_dir_head - DIR の見出し " Directory of X:\PATH" を出す
 ; ---------------------------------------------------------------------------
+; 見出しに出すのは「いま並べようとしている場所」であって、カレント
+; ディレクトリではない。カレントを出すと "DIR B:" のときに嘘になる
+; (A: の中身が出ていないのに "Directory of A:\" と書かれる)。
+; AH=60h でパスを正規化し、最後の '\' までを取り出す。
 show_dir_head:
         mov     si, msg_dir_head
         call    puts
 
+        push    es
+        push    ds
+        pop     es
+        mov     si, path_buf
+        mov     di, cwd_buf
+        mov     ah, 0x60
+        int     0x21
+        pop     es
+        jc      .fallback
+
+        ; 最後の '\' の位置を探す
+        mov     si, cwd_buf
+        xor     di, di                  ; DI = '\' の次の位置 (0 = 見つからず)
+        mov     bx, si
+.scan:
+        mov     al, [bx]
+        test    al, al
+        jz      .scanned
+        cmp     al, '\'
+        jne     .next
+        mov     di, bx
+        inc     di
+.next:
+        inc     bx
+        jmp     .scan
+.scanned:
+        test    di, di
+        jz      .fallback               ; '\' が無い = 正規化に失敗している
+        mov     bx, di
+        sub     bx, si
+        cmp     bx, 3
+        jbe     .cut                    ; "X:\" はそのまま残す
+        dec     di                      ; それより深ければ末尾の '\' を落とす
+.cut:
+        mov     byte [di], 0
+        call    puts
+        jmp     .tail
+
+.fallback:
         mov     ah, 0x19
         int     0x21
         add     al, 'A'
@@ -1962,7 +2005,6 @@ show_dir_head:
         call    putc
         mov     al, '\'
         call    putc
-
         mov     si, cwd_buf
         mov     ah, 0x47
         mov     dl, 0
@@ -1970,6 +2012,7 @@ show_dir_head:
         mov     si, cwd_buf
         call    puts
 
+.tail:
         mov     si, msg_crlf2
         call    puts
         ret

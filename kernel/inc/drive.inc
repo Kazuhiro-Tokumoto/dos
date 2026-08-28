@@ -84,6 +84,62 @@ dpb_for_drive:
         ret
 
 ; ---------------------------------------------------------------------------
+; drive_mark_reload - 全ドライブに「BPB を読み直せ」の印を立てる (AH=0Dh)
+; ---------------------------------------------------------------------------
+drive_mark_reload:
+        push    ax
+        push    cx
+        push    di
+        xor     al, al
+        mov     cx, MAX_PHYS_DRIVES
+.loop:
+        call    drive_slot
+        test    byte [di + DRV_FLAGS], DRVF_PRESENT
+        jz      .next
+        or      byte [di + DRV_FLAGS], DRVF_RELOAD
+.next:
+        inc     al
+        loop    .loop
+        pop     di
+        pop     cx
+        pop     ax
+        ret
+
+; ---------------------------------------------------------------------------
+; drive_reload_check - DRVF_RELOAD が立っていたらブートセクタを読み直す
+;   入力: AL = ドライブ番号
+;
+; FORMAT のようにディスクの構造を書き換えるプログラムのあと、DOS が古い
+; 諸元を信じたままにならないようにするためのもの。印は AH=0Dh で立つ。
+; ---------------------------------------------------------------------------
+drive_reload_check:
+        push    ax
+        push    di
+        cmp     al, MAX_PHYS_DRIVES
+        jae     .out
+        call    drive_slot
+        test    byte [di + DRV_FLAGS], DRVF_RELOAD
+        jz      .out
+        and     byte [di + DRV_FLAGS], ~DRVF_RELOAD & 0xFF
+        test    byte [di + DRV_FLAGS], DRVF_PRESENT
+        jz      .out
+        ; DEVICE= で入れたドライバのドライブは自分で諸元を持っているので触らない
+        test    byte [di + DRV_FLAGS], DRVF_EXTERNAL
+        jnz     .out
+
+        call    drive_read_bpb
+        jc      .out
+        call    dpb_build
+        ; いま載っているのがこのドライブなら、載せ直させる
+        cmp     al, [fs_drive]
+        jne     .out
+        mov     byte [fs_drive], 0xFF
+.out:
+        pop     di
+        pop     ax
+        ret
+
+; ---------------------------------------------------------------------------
 ; drive_select - 作業対象のドライブを切り替える
 ;   入力: AL = ドライブ番号
 ;   出力: CF=1 なら存在しないドライブ
@@ -98,6 +154,8 @@ drive_select:
         push    cx
         push    dx
         push    di
+
+        call    drive_reload_check      ; 印が立っていれば BPB を読み直す
 
         cmp     al, [fs_drive]
         je      .already

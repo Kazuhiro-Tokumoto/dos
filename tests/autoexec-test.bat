@@ -29,6 +29,12 @@ PIPETEST < README.TXT
 DEL DIRLIST.TXT
 LFNTEST
 EMSTEST
+REM MYDOS 自身でディスクを作る。B: は MYDOS 以外の道具で作った
+REM ごく普通の FAT12 フロッピー。これを FORMAT で作り直し、SYS で
+REM 起動できるようにする。テストの最後に、そのディスクから起動する。
+FORMAT B: /V:NEWDISK < YES.TXT
+SYS B:
+DIR B:
 XMSTEST
 REM XMS のブロック転送でアンリアルモードに出入りしたあと、
 REM ハードディスクを触れるかどうか。ここで転ぶと再起動していた。
