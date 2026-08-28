@@ -12,6 +12,31 @@
 ; ============================================================================
 
 int21_dispatch:
+%ifdef INT21_TRACE_ALL
+        ; -DINT21_TRACE_ALL で、呼ばれた機能をすべてシリアルに出す。
+        ; 実物のプログラムがどこで詰まっているかを追うための道具。
+        pusha
+        push    ds
+        push    cs
+        pop     ds
+        mov     bx, [u_ax]
+        mov     al, bh
+        shr     al, 4
+        call    trace_hexd
+        mov     al, bh
+        call    trace_hexd
+        mov     al, '/'
+        call    trace_putc
+        mov     al, bl
+        shr     al, 4
+        call    trace_hexd
+        mov     al, bl
+        call    trace_hexd
+        mov     al, ' '
+        call    trace_putc
+        pop     ds
+        popa
+%endif
         movzx   bx, byte [u_ax + 1]     ; AH = 機能番号
         shl     bx, 1
         jmp     [int21_table + bx]
@@ -31,8 +56,68 @@ int21_err:                              ; AX = エラーコード
 
 f_bad:
         ; 実装していない機能。DOS は「そんな機能はない」を CF=1 で返す
+%ifdef INT21_TRACE
+        ; -DINT21_TRACE でビルドすると、実装していない機能が呼ばれるたびに
+        ; シリアルへ "!21:AX " を出す。実物のプログラムを走らせて、
+        ; 何が足りないのかを洗い出すための道具。
+        pusha
+        push    ds
+        push    cs
+        pop     ds
+        mov     bx, [u_ax]
+        mov     al, '!'
+        call    trace_putc
+        mov     al, '2'
+        call    trace_putc
+        mov     al, '1'
+        call    trace_putc
+        mov     al, ':'
+        call    trace_putc
+        mov     al, bh
+        shr     al, 4
+        call    trace_hexd
+        mov     al, bh
+        call    trace_hexd
+        mov     al, bl
+        shr     al, 4
+        call    trace_hexd
+        mov     al, bl
+        call    trace_hexd
+        mov     al, ' '
+        call    trace_putc
+        pop     ds
+        popa
+%endif
         mov     ax, ERR_FUNC
         jmp     int21_err
+
+%if 1
+trace_putc:
+        push    ax
+        push    dx
+        mov     ah, al
+.wait:
+        mov     dx, 0x3FD
+        in      al, dx
+        test    al, 0x20
+        jz      .wait
+        mov     dx, 0x3F8
+        mov     al, ah
+        out     dx, al
+        pop     dx
+        pop     ax
+        ret
+trace_hexd:
+        push    ax
+        and     al, 0x0F
+        cmp     al, 10
+        jb      .d
+        add     al, 'A' - 10 - '0'
+.d:     add     al, '0'
+        call    trace_putc
+        pop     ax
+        ret
+%endif
 
 ; ---------------------------------------------------------------------------
 ; copy_path - 呼び出し元の DS:DX が指す ASCIIZ をカーネル側へ写す
@@ -1742,7 +1827,27 @@ f_65:
         cmp     cx, 5
         jb      .too_small
 
+        ; AL=02h/04h/05h/06h/07h は「表そのもの」ではなく
+        ; 「表への far ポインタ」を返す約束になっている。
+        ;
+        ;   +00  byte   情報の種類 (AL をそのまま)
+        ;   +01  dword  表の位置 (far)
+        ;
+        ; ここに国別情報を書いてしまうと、呼び出し側はその中身を
+        ; アドレスとして読む。SORT は AL=06h で照合順序の表を取り、
+        ; 文字の重みをそこから引くので、並びがめちゃくちゃになる。
         mov     al, [u_ax]
+        cmp     al, 0x02
+        je      .tab_upcase
+        cmp     al, 0x04
+        je      .tab_fname_upcase
+        cmp     al, 0x05
+        je      .tab_fname_term
+        cmp     al, 0x06
+        je      .tab_collate
+        cmp     al, 0x07
+        je      .tab_dbcs
+
         mov     [es:di], al                     ; 情報の種類
         mov     word [es:di + 1], 38            ; この後に続く長さ
         mov     word [es:di + 3], 932           ; コードページ (日本語)
@@ -1763,6 +1868,30 @@ f_65:
         pop     es
         mov     ax, ERR_BAD_DATA
         jmp     int21_err
+
+; --- 表への far ポインタを返す下位機能 ---
+.tab_upcase:
+        mov     bx, upcase_tab
+        jmp     .ret_ptr
+.tab_fname_upcase:
+        mov     bx, upcase_tab
+        jmp     .ret_ptr
+.tab_fname_term:
+        mov     bx, fname_term_tab
+        jmp     .ret_ptr
+.tab_collate:
+        mov     bx, collate_tab
+        jmp     .ret_ptr
+.tab_dbcs:
+        mov     bx, dbcs_tab
+.ret_ptr:
+        mov     [es:di], al                     ; 情報の種類
+        mov     [es:di + 1], bx
+        mov     ax, cs
+        mov     [es:di + 3], ax
+        pop     es
+        mov     byte [u_ax], 0
+        jmp     int21_ok
 
 ; ===========================================================================
 ; 66h - コードページの取得と設定
@@ -2133,6 +2262,53 @@ lfn_slot_used:      times LFN_SLOTS db 0
 lfn_cur_slot:       db 0
 lfn_save_dta_seg:   dw 0
 lfn_save_dta_off:   dw 0
+
+; --- AH=65h が指し示す表 --------------------------------------------------
+;
+; どれも「長さ (word) + 中身」という形。DOS の国別情報の一部で、
+; 文字の大小や並び順をプログラム側で DOS に合わせるためにある。
+
+; 大文字への変換表 (0x80..0xFF)。ここはコードページ次第だが、
+; 変換しない (そのまま) にしておけば少なくとも壊れない。
+upcase_tab:
+        dw      128
+%assign i 0x80
+%rep 128
+        db      i
+%assign i i+1
+%endrep
+
+; ファイル名に使えない文字の表。形は DOS が決めている。
+fname_term_tab:
+        dw      22
+        db      1
+        db      0x00            ; 使える文字の下限
+        db      0xFF            ; 上限
+        db      0
+        db      0x00            ; 使えない範囲の下限
+        db      0x20            ; 上限
+        db      2
+        db      14              ; 区切り文字の数
+        db      '.', '"', '/', '\', '[', ']', ':', '|', '<', '>', '+', '=', ';', ','
+
+; 照合順序の表。文字コードを「並べるときの重み」に写す。
+; 小文字を大文字と同じ重みにすることで、SORT の並びが DOS と同じになる。
+collate_tab:
+        dw      256
+%assign i 0
+%rep 256
+ %if i >= 0x61 && i <= 0x7A
+        db      i - 0x20
+ %else
+        db      i
+ %endif
+%assign i i+1
+%endrep
+
+; 2 バイト文字の先頭バイトの範囲。空 (対応していない)。
+dbcs_tab:
+        dw      0
+        dw      0
 
 ; --- 変数 ------------------------------------------------------------------
 verify_flag:    db 0

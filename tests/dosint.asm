@@ -85,6 +85,7 @@ start:
         call    t_sft
         call    t_cds
         call    t_buffers
+        call    t_country
 
         call    newline
         mov     si, msg_result
@@ -569,6 +570,66 @@ t_buffers:
 ; ============================================================================
 ; 小道具
 ; ============================================================================
+; ============================================================================
+; 8. AH=65h の表 (照合順序ほか)
+;
+; AL=02h/04h/05h/06h/07h は「表そのもの」ではなく「表への far ポインタ」を
+; 返す約束になっている。ここを取り違えて国別情報を書いてしまうと、
+; 呼び出し側はその中身をアドレスとして読む。SORT は AL=06h の照合順序表
+; から文字の重みを引くので、並びがめちゃくちゃになる。
+; ============================================================================
+t_country:
+        mov     si, n_country
+        call    begin
+
+        ; --- AL=06h: 照合順序の表 ---
+        push    ds
+        pop     es
+        mov     di, ctry_buf
+        mov     cx, 5
+        mov     bx, 0xFFFF              ; いまのドライブ / 国
+        mov     dx, 0xFFFF
+        mov     ax, 0x6506
+        int     0x21
+        jc      fail
+        cmp     byte [ctry_buf], 0x06   ; 情報の種類がそのまま返ること
+        jne     fail
+
+        ; far ポインタの先は「長さ 256 + 256 バイト」
+        les     di, [ctry_buf + 1]
+        cmp     word [es:di], 256
+        jne     fail
+
+        ; 重みは 'A' が 'A'、小文字の 'a' も 'A' と同じ (大小を区別しない)
+        add     di, 2
+        mov     al, [es:di + 'A']
+        cmp     al, 'A'
+        jne     fail
+        mov     al, [es:di + 'a']
+        cmp     al, 'A'
+        jne     fail
+        mov     al, [es:di + '0']
+        cmp     al, '0'
+        jne     fail
+
+        ; --- AL=02h: 大文字への変換表 ---
+        push    ds
+        pop     es
+        mov     di, ctry_buf
+        mov     cx, 5
+        mov     bx, 0xFFFF
+        mov     dx, 0xFFFF
+        mov     ax, 0x6502
+        int     0x21
+        jc      fail
+        cmp     byte [ctry_buf], 0x02
+        jne     fail
+        les     di, [ctry_buf + 1]
+        cmp     word [es:di], 128
+        jne     fail
+
+        jmp     pass
+
 begin:
         push    si
         mov     si, str_indent
@@ -667,6 +728,7 @@ put_dec:
 ; ============================================================================
 ; データ
 ; ============================================================================
+ctry_buf:    times 48 db 0
 msg_head:    db 13, 10, '=== MYDOS internal structure test (via AH=52h) ===', 13, 10, 13, 10, 0
 msg_result:  db '### RESULT pass=', 0
 msg_result2: db ' fail=', 0
@@ -683,6 +745,7 @@ n_dev:       db 'LoL+22  device chain NUL-CON-AUX-PRN-CLOCK$-block', 0
 n_sft:       db 'LoL+04  SFT chain shows an open file by name', 0
 n_cds:       db 'LoL+16  CDS array follows CHDIR', 0
 n_buf:       db 'LoL+12  disk buffer chain is linked', 0
+n_country:   db 'AH=65h  the country tables are far pointers, not data', 0
 
 e_nul:       db 'NUL     '
 e_con:       db 'CON     '

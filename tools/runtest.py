@@ -39,6 +39,8 @@ REQUIRED = [
     ("INSTALL: instest ran with args: alpha beta",
      "CONFIG.SYS の INSTALL= がプログラムを引数付きで実行する"),
     ("My Long File Name.txt", "DIR が長いファイル名をそのまま表示する"),
+    ("tail-line", "COMMAND.COM の >> による追記"),
+    ("PIPE-GOT: MYDOS", "COMMAND.COM の | と < でハンドルが差し替わる"),
 ]
 
 # XMSTEST / CFGTEST / HDTEST / DOSINT / FCBTEST / DOSTEST / ENVTEST の

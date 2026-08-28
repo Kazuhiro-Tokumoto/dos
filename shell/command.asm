@@ -134,6 +134,91 @@ exec_line:
 exec_line_at:
         call    skip_spaces
         cmp     byte [si], 0
+        je      exec_line_ret           ; 空行
+
+        ; --- リダイレクトとパイプを先に取り除く ---
+        ;
+        ; "DIR > FILE" や "TYPE X | MORE" の記号はコマンドの引数ではなく
+        ; シェルの指示なので、コマンドに渡す前に行から抜いておく。
+        ; DOS のプログラムはハンドル 0/1 をそのまま使うだけで、
+        ; 自分がリダイレクトされていることを知らない。
+        call    redir_parse
+
+        cmp     word [pipe_ptr], 0
+        jne     exec_pipeline
+
+        call    redir_apply
+        jc      exec_line_ret
+        push    si
+        call    exec_command
+        pop     si
+        call    redir_restore
+        ret
+
+; --- パイプ: 左をいったんファイルに出し、それを右に食わせる ---
+;
+; 当時の DOS も同じことをしていた。プロセスが同時に 2 つ動かないので、
+; 本当の意味で管をつなぐことはできない。
+exec_pipeline:
+        push    si                      ; SI = 左側 (clean_buf)
+        mov     ax, [pipe_ptr]
+        push    ax                      ; 右側の位置
+
+        ; 入れ子のパイプでも名前がぶつからないよう、深さで番号を変える
+        inc     byte [pipe_depth]
+        mov     al, [pipe_depth]
+        add     al, '0'
+        mov     [pipe_tmp_name + 4], al
+
+        ; --- 左側: 出力を一時ファイルへ ---
+        mov     di, redir_out
+        mov     si, pipe_tmp_name
+        call    strcpy
+        mov     byte [redir_append], 0
+        mov     byte [redir_in], 0
+        call    redir_apply
+        jc      .fail
+        pop     ax
+        pop     si
+        push    ax
+        call    exec_command
+        call    redir_restore
+
+        ; --- 右側: 入力を一時ファイルから ---
+        mov     byte [redir_out], 0
+        mov     di, redir_in
+        mov     si, pipe_tmp_name
+        call    strcpy
+        call    redir_apply
+        jc      .fail2
+        pop     si                      ; 右側の位置
+        push    si
+        call    exec_line_at            ; 入れ子のパイプもここで処理される
+        call    redir_restore
+
+        mov     dx, pipe_tmp_name
+        mov     ah, 0x41                ; 一時ファイルを消す
+        int     0x21
+        pop     ax
+        dec     byte [pipe_depth]
+        ret
+.fail:
+        pop     ax
+        pop     si
+        dec     byte [pipe_depth]
+        ret
+.fail2:
+        pop     si
+        dec     byte [pipe_depth]
+        ret
+
+exec_line_ret:
+        ret
+
+; --- コマンドを 1 つ実行する (リダイレクトは呼び出し側で済ませてある) ---
+exec_command:
+        call    skip_spaces
+        cmp     byte [si], 0
         je      .done                   ; 空行
 
         ; コマンド名を切り出して大文字にする
@@ -215,6 +300,285 @@ exec_line_at:
 
 .external:
         call    run_external
+        ret
+
+; ============================================================================
+; リダイレクトとパイプ
+;
+; DOS のプログラムはハンドル 0 (標準入力) と 1 (標準出力) をそのまま使う。
+; "> FILE" はプログラムには一切見えず、シェルが起動前にハンドル 1 を
+; 差し替えるだけ。AH=45h (複製) で元を控え、AH=46h (指定した番号へ複製)
+; で差し替え、終わったら戻す。
+; ============================================================================
+
+; --- redir_parse - 行から記号を抜き取る ---
+;   入力: DS:SI = 行
+;   出力: SI = clean_buf (記号を抜いたコマンド)
+;         redir_in / redir_out / redir_append / pipe_ptr
+redir_parse:
+        push    ax
+        push    bx
+        push    di
+
+        mov     byte [redir_in], 0
+        mov     byte [redir_out], 0
+        mov     byte [redir_append], 0
+        mov     word [pipe_ptr], 0
+
+        mov     di, clean_buf
+.loop:
+        mov     al, [si]
+        test    al, al
+        jz      .done
+
+        cmp     al, '"'
+        je      .quote
+        cmp     al, '<'
+        je      .in
+        cmp     al, '>'
+        je      .out
+        cmp     al, '|'
+        je      .pipe
+
+        stosb
+        inc     si
+        jmp     .loop
+
+.quote:
+        ; 引用符の中は記号として扱わない (長い名前に > が入ることは無いが、
+        ; 引用符の中身をそのまま渡すという約束は守る)
+        stosb
+        inc     si
+.qloop:
+        mov     al, [si]
+        test    al, al
+        jz      .done
+        stosb
+        inc     si
+        cmp     al, '"'
+        jne     .qloop
+        jmp     .loop
+
+.in:
+        inc     si
+        push    di
+        mov     di, redir_in
+        call    redir_word
+        pop     di
+        jmp     .loop
+
+.out:
+        inc     si
+        mov     byte [redir_append], 0
+        cmp     byte [si], '>'
+        jne     .out_go
+        inc     si
+        mov     byte [redir_append], 1
+.out_go:
+        push    di
+        mov     di, redir_out
+        call    redir_word
+        pop     di
+        jmp     .loop
+
+.pipe:
+        inc     si
+        mov     [pipe_ptr], si          ; 右側の位置を覚える
+        jmp     .done
+
+.done:
+        mov     byte [di], 0
+        mov     si, clean_buf
+        pop     di
+        pop     bx
+        pop     ax
+        ret
+
+; redir_word - 記号のあとのファイル名を DS:SI から ES:DI へ取る
+redir_word:
+        push    ax
+.skip:
+        mov     al, [si]
+        cmp     al, ' '
+        je      .adv
+        cmp     al, 9
+        jne     .copy
+.adv:
+        inc     si
+        jmp     .skip
+.copy:
+        cmp     byte [si], '"'
+        jne     .plain
+        inc     si
+.q:
+        mov     al, [si]
+        test    al, al
+        jz      .end
+        inc     si
+        cmp     al, '"'
+        je      .end
+        mov     [di], al
+        inc     di
+        jmp     .q
+.plain:
+        mov     al, [si]
+        test    al, al
+        jz      .end
+        cmp     al, ' '
+        je      .end
+        cmp     al, 9
+        je      .end
+        cmp     al, '<'
+        je      .end
+        cmp     al, '>'
+        je      .end
+        cmp     al, '|'
+        je      .end
+        inc     si
+        mov     [di], al
+        inc     di
+        jmp     .plain
+.end:
+        mov     byte [di], 0
+        pop     ax
+        ret
+
+; --- redir_apply - ハンドル 0/1 を差し替える ---
+;   出力: CF=1 なら開けなかった (メッセージは出してある)
+redir_apply:
+        push    ax
+        push    bx
+        push    cx
+        push    dx
+
+        mov     word [saved_stdin], 0xFFFF
+        mov     word [saved_stdout], 0xFFFF
+
+        cmp     byte [redir_in], 0
+        je      .no_in
+        mov     dx, redir_in
+        mov     ax, 0x3D00              ; 読み取りで開く
+        int     0x21
+        jc      .in_err
+        mov     [new_stdin], ax
+
+        mov     bx, 0                   ; いまのハンドル 0 を控える
+        mov     ah, 0x45
+        int     0x21
+        jc      .in_err2
+        mov     [saved_stdin], ax
+
+        mov     bx, [new_stdin]
+        mov     cx, 0
+        mov     ah, 0x46                ; ハンドル 0 に重ねる
+        int     0x21
+        mov     bx, [new_stdin]
+        mov     ah, 0x3E
+        int     0x21
+.no_in:
+
+        cmp     byte [redir_out], 0
+        je      .no_out
+        cmp     byte [redir_append], 0
+        jne     .append
+        mov     dx, redir_out
+        xor     cx, cx
+        mov     ah, 0x3C                ; 作り直す
+        int     0x21
+        jc      .out_err
+        jmp     .out_have
+.append:
+        mov     dx, redir_out
+        mov     ax, 0x3D01              ; 書き込みで開く
+        int     0x21
+        jnc     .seek_end
+        mov     dx, redir_out
+        xor     cx, cx
+        mov     ah, 0x3C
+        int     0x21
+        jc      .out_err
+        jmp     .out_have
+.seek_end:
+        mov     bx, ax
+        push    ax
+        xor     cx, cx
+        xor     dx, dx
+        mov     ax, 0x4202              ; 末尾へ
+        int     0x21
+        pop     ax
+.out_have:
+        mov     [new_stdout], ax
+
+        mov     bx, 1
+        mov     ah, 0x45
+        int     0x21
+        jc      .out_err2
+        mov     [saved_stdout], ax
+
+        mov     bx, [new_stdout]
+        mov     cx, 1
+        mov     ah, 0x46
+        int     0x21
+        mov     bx, [new_stdout]
+        mov     ah, 0x3E
+        int     0x21
+.no_out:
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        clc
+        ret
+
+.in_err:
+.in_err2:
+        mov     si, msg_redir_in
+        call    puts
+        jmp     .fail
+.out_err:
+.out_err2:
+        mov     si, msg_redir_out
+        call    puts
+.fail:
+        call    redir_restore
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        stc
+        ret
+
+; --- redir_restore - 控えておいたハンドルを戻す ---
+redir_restore:
+        push    ax
+        push    bx
+        push    cx
+
+        cmp     word [saved_stdin], 0xFFFF
+        je      .no_in
+        mov     bx, [saved_stdin]
+        mov     cx, 0
+        mov     ah, 0x46
+        int     0x21
+        mov     bx, [saved_stdin]
+        mov     ah, 0x3E
+        int     0x21
+        mov     word [saved_stdin], 0xFFFF
+.no_in:
+        cmp     word [saved_stdout], 0xFFFF
+        je      .no_out
+        mov     bx, [saved_stdout]
+        mov     cx, 1
+        mov     ah, 0x46
+        int     0x21
+        mov     bx, [saved_stdout]
+        mov     ah, 0x3E
+        int     0x21
+        mov     word [saved_stdout], 0xFFFF
+.no_out:
+        pop     cx
+        pop     bx
+        pop     ax
         ret
 
 ; ============================================================================
@@ -1667,6 +2031,8 @@ msg_banner:     db 'MYDOS Command Interpreter', 13, 10
 msg_ver:        db 'MYDOS Version ', 0
 msg_dir_head:   db 13, 10, ' Directory of ', 0
 msg_crlf2:      db 13, 10, 13, 10, 0
+msg_redir_in:   db 'Cannot open input file', 13, 10, 0
+msg_redir_out:  db 'Cannot create output file', 13, 10, 0
 msg_bad_drive:  db 'Invalid drive specification', 13, 10, 0
 msg_dir_tag:    db '     <DIR>', 0
 msg_files:      db ' file(s)', 13, 10, 0
@@ -1746,6 +2112,18 @@ bat_buf:        times BATMAX db 0
 
 ; DTA は PSP:0080 のままだと入力バッファと重なるので、自前のものを使う。
 ; (PSP の 0080 はコマンドテイルの置き場でもあるため)
+clean_buf:      times MAXLINE + 8 db 0      ; 記号を抜いたコマンド
+redir_in:       times 80 db 0
+redir_out:      times 80 db 0
+redir_append:   db 0
+pipe_ptr:       dw 0
+pipe_depth:     db 0
+pipe_tmp_name:  db 'PIPE0.$$$', 0
+saved_stdin:    dw 0xFFFF
+saved_stdout:   dw 0xFFFF
+new_stdin:      dw 0
+new_stdout:     dw 0
+
 dta_buf:        times 48 db 0
 lfn_find_buf:   times LFD_SIZE_TOTAL db 0   ; 長い名前の検索が返す構造体
 dir_use_lfn:    db 0                        ; 1 = 長い名前の窓口で探している

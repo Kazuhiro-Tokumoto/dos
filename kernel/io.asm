@@ -547,6 +547,38 @@ int21_handler:
 ; ---------------------------------------------------------------------------
 int21_exit:
         cli
+%ifdef INT21_TRACE_ALL
+        pusha
+        push    ds
+        push    cs
+        pop     ds
+        mov     al, '='
+        call    trace_putc
+        cmp     byte [ret_cf], 0
+        je      .tr_ok
+        mov     al, 'E'
+        call    trace_putc
+        mov     bx, [u_ax]
+        mov     al, bh
+        shr     al, 4
+        call    trace_hexd
+        mov     al, bh
+        call    trace_hexd
+        mov     al, bl
+        shr     al, 4
+        call    trace_hexd
+        mov     al, bl
+        call    trace_hexd
+        jmp     .tr_done
+.tr_ok:
+        mov     al, 'o'
+        call    trace_putc
+.tr_done:
+        mov     al, ' '
+        call    trace_putc
+        pop     ds
+        popa
+%endif
 
         ; いまの作業領域を退避用に写す
         push    ds

@@ -952,6 +952,20 @@ get_set_attr:
         call    path_resolve
         jc      .no_path
 
+        ; "C:\" や "C:\SUB\" のように、要素が残らないパスは
+        ; ディレクトリそのものを指している。ルートにはディレクトリ
+        ; エントリが無いので探しても見つからない。ここで拾わないと
+        ; XCOPY のような「複写元がディレクトリか確かめる」プログラムが
+        ; 「そんなパスは無い」と言って止まる。
+        cmp     byte [name83], ' '
+        jne     .have_name
+        cmp     byte [.op], 0
+        jne     .not_found              ; ルートの属性は変えられない
+        mov     cx, ATTR_DIRECTORY
+        clc
+        jmp     .out
+.have_name:
+
         push    si
         mov     si, name83
         mov     cl, ATTR_DIRECTORY

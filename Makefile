@@ -39,7 +39,7 @@ PROGS := $(BUILD)/hello.com $(BUILD)/hello.exe $(BUILD)/dostest.com \
          $(BUILD)/fcbtest.com $(BUILD)/tsrtest.com $(BUILD)/ovltest.com \
          $(BUILD)/dosint.com $(BUILD)/hdtest.com $(BUILD)/cfgtest.com \
          $(BUILD)/instest.com $(BUILD)/xmstest.com $(BUILD)/envtest.com \
-         $(BUILD)/lfntest.com \
+         $(BUILD)/lfntest.com $(BUILD)/pipetest.com \
          $(BUILD)/ovl.ovl $(BUILD)/mydev.sys $(BUILD)/ramdisk.sys
 
 KDEPS := kernel/io.asm $(wildcard $(INCDIR)/*.inc)
@@ -110,6 +110,7 @@ define make_image
 	$(MCOPY) -i $(1) -o $(BUILD)/xmstest.com ::XMSTEST.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/envtest.com ::ENVTEST.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/lfntest.com ::LFNTEST.COM
+	$(MCOPY) -i $(1) -o $(BUILD)/pipetest.com ::PIPETEST.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/mydev.sys ::MYDEV.SYS
 	$(MCOPY) -i $(1) -o $(BUILD)/ramdisk.sys ::RAMDISK.SYS
 	$(MCOPY) -i $(1) -o tests/config.sys ::CONFIG.SYS
