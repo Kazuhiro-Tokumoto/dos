@@ -27,6 +27,12 @@ ECHO tail-line >> DIRLIST.TXT
 TYPE README.TXT | PIPETEST
 PIPETEST < README.TXT
 DEL DIRLIST.TXT
-DOSTEST
 LFNTEST
 XMSTEST
+REM XMS のブロック転送でアンリアルモードに出入りしたあと、
+REM ハードディスクを触れるかどうか。ここで転ぶと再起動していた。
+C:
+DIR
+A:
+ECHO after XMS block move
+DOSTEST

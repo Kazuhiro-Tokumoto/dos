@@ -41,6 +41,7 @@ REQUIRED = [
     ("My Long File Name.txt", "DIR が長いファイル名をそのまま表示する"),
     ("tail-line", "COMMAND.COM の >> による追記"),
     ("PIPE-GOT: MYDOS", "COMMAND.COM の | と < でハンドルが差し替わる"),
+    ("after XMS block move", "XMS のブロック転送のあとでもハードディスクを触れる"),
 ]
 
 # XMSTEST / CFGTEST / HDTEST / DOSINT / FCBTEST / DOSTEST / ENVTEST の

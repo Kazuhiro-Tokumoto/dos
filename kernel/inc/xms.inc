@@ -190,6 +190,10 @@ a20_kbd:
         call    a20_wait_in
         pop     ax
         or      al, 2                   ; bit1 = A20
+        or      al, 1                   ; bit0 は CPU のリセット線。0 を書くと
+                                        ; 機械が再起動する。読めた値をそのまま
+                                        ; 書き戻す作りだと、たまたま 0 が
+                                        ; 返ってきた瞬間に落ちる。
         out     0x60, al
         call    a20_wait_in
         mov     al, 0xAE                ; キーボードを戻す
@@ -212,6 +216,7 @@ a20_kbd_off:
         call    a20_wait_in
         pop     ax
         and     al, ~2 & 0xFF
+        or      al, 1                   ; bit0 (リセット線) は必ず立てておく
         out     0x60, al
         call    a20_wait_in
         pop     ax
@@ -1188,6 +1193,13 @@ xms_block_move:
         push    ds
         push    es
 
+        ; A20 の状態を控えておく。転送のために開けるが、閉じたまま
+        ; 使っていたプログラムにとっては、開きっぱなしで返されると
+        ; 1MB を越えたところが回り込まなくなる。HIMEM.SYS も
+        ; ブロック転送の前後で元に戻す。
+        call    a20_query
+        mov     [xms_a20_saved], al
+
         ; 1MB より上に触るので A20 は開けておく
         call    a20_enable
         jc      .fail
@@ -1202,6 +1214,11 @@ xms_block_move:
         pop     eax
 
         cli
+        ; いま入っている GDTR を控えてから自前のものに差し替える。
+        ; 戻さずに帰ると、この先 BIOS や常駐ソフトがプロテクトモードへ
+        ; 出入りするときに、自分が置いたつもりの GDT ではなく MYDOS の
+        ; 2 エントリしかない表を見ることになる。
+        sgdt    [saved_gdtr]
         lgdt    [flat_gdtr]
 
         mov     eax, cr0
@@ -1248,7 +1265,14 @@ xms_block_move:
         xor     bx, bx
         mov     fs, bx
         mov     gs, bx
+        lgdt    [saved_gdtr]            ; GDTR も元に戻す
         sti
+
+        ; A20 も元の状態に戻す
+        cmp     byte [xms_a20_saved], 0
+        jne     .keep_a20
+        call    a20_disable
+.keep_a20:
 
         pop     es
         pop     ds
@@ -1279,6 +1303,11 @@ flat_gdt:
 flat_gdtr:
                 dw 15                   ; GDT の大きさ - 1
                 dd 0                    ; 位置 (起動時に埋める)
+
+; 差し替える前の GDTR を控える場所
+saved_gdtr:     dw 0
+                dd 0
+xms_a20_saved:  db 0                    ; 転送前の A20 の状態
 
 ; --- 変数 ------------------------------------------------------------------
 xms_present:    db 0            ; XMS を名乗るか
