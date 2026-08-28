@@ -104,6 +104,7 @@ fcb_name83:
         push    cx
         push    si
         push    di
+        call    fcb_select
         mov     si, di
         add     si, FCB_NAME
         mov     di, name83
@@ -118,6 +119,63 @@ fcb_name83:
         pop     si
         pop     cx
         pop     ax
+        ret
+
+; ---------------------------------------------------------------------------
+; fcb_select - FCB の先頭 1 バイトにあるドライブ番号を選ぶ
+;   入力: ES:DI = FCB
+;
+; FCB のドライブ欄は 0 がカレントドライブ、1 が A:、2 が B: という数え方で、
+; ハンドル系の 0=A: とは 1 つずれている。ここを見ずにいつもカレントドライブを
+; 触ると、"B:FOO.TXT" のつもりで組み立てた FCB が A: を開いてしまう。
+; AH=29h (コマンドラインを FCB に畳む) はドライブ欄を正しく埋めるので、
+; 引数のファイル名を FCB 経由で受け取る当時のプログラムは、この 1 バイトが
+; 効かないと必ず別のドライブを読む。
+;
+; 範囲外のドライブ番号はここでは黙って無視する。選び直さないまま探しに行けば
+; ファイルが見つからず、FCB 系の決まりどおり AL=FFh が返る。
+; ---------------------------------------------------------------------------
+fcb_select:
+        push    ax
+        mov     al, [es:di + FCB_DRIVE]
+        test    al, al
+        jnz     .named
+        mov     al, [cur_drive]                 ; 0 = カレントドライブ
+        jmp     .go
+.named:
+        dec     al                              ; 1 = A: → 0 = A:
+.go:
+        cmp     al, MAX_DRIVES
+        jae     .done
+        call    drive_select
+.done:
+        pop     ax
+        ret
+
+; ---------------------------------------------------------------------------
+; fcb_dirclus - いま選ばれているドライブのカレントディレクトリを得る
+;   出力: AX = ディレクトリの先頭クラスタ (0 = ルート)
+;
+; FCB にはパスが入らないので、探す場所は常にそのドライブのカレント
+; ディレクトリになる。カレントドライブなら cur_dir_clus、そうでなければ
+; そのドライブの CDS に控えてある位置を使う。
+; ---------------------------------------------------------------------------
+fcb_dirclus:
+        push    di
+        mov     al, [fs_drive]
+        cmp     al, [cur_drive]
+        jne     .other
+        mov     ax, [cur_dir_clus]
+        jmp     .out
+.other:
+        call    cds_addr
+        jc      .root
+        mov     ax, [di + CDS_CLUSTER]
+        jmp     .out
+.root:
+        xor     ax, ax
+.out:
+        pop     di
         ret
 
 ; ---------------------------------------------------------------------------
@@ -337,7 +395,7 @@ fcb_open_by_name:
         push    ds
         pop     es
 
-        mov     ax, [cur_dir_clus]
+        call    fcb_dirclus
         push    si
         mov     si, name83
         mov     cl, [fcb_attr]          ; 拡張 FCB で指定された属性
@@ -434,7 +492,9 @@ f_11:
         call    fcb_name83
 
         ; 検索状態をカーネル側に置く (DTA には結果だけを書く)
-        mov     ax, [cur_dir_clus]
+        mov     al, [fs_drive]
+        mov     [fcb_find_drive], al
+        call    fcb_dirclus
         mov     [fcb_find_dir], ax
         mov     word [fcb_find_idx], 0
         push    si
@@ -476,6 +536,12 @@ fcb_scan:
         push    si
         push    di
         push    es
+
+        ; AH=12h (次を探す) は FCB のドライブ欄を見ない。AH=11h のときに
+        ; 選んだドライブへ戻しておかないと、間に別のドライブを触る処理が
+        ; 入った瞬間に、検索の続きが違うディスクの上で行われる。
+        mov     al, [fcb_find_drive]
+        call    drive_select
 
 .loop:
         mov     ax, [fcb_find_idx]
@@ -544,7 +610,9 @@ fcb_scan:
         mov     [es:di + FCB_EXT_ATTR], al
         add     di, FCB_EXT_SIZE
 .plain_out:
-        mov     byte [es:di], 1                 ; ドライブ番号 (1 = A:)
+        mov     al, [fs_drive]
+        inc     al
+        mov     [es:di], al                     ; ドライブ番号 (1 = A:)
         inc     di
         ; DS:SI = dir_buf の中のエントリ、ES:DI = DTA。DS はカーネルのまま。
         mov     cx, DIR_ENTSIZE
@@ -582,7 +650,7 @@ f_13:
         mov     word [.idx], 0
 .loop:
         push    bx
-        mov     ax, [cur_dir_clus]
+        call    fcb_dirclus
         push    si
         mov     si, name83
         mov     cl, 0
@@ -662,7 +730,7 @@ f_16:
         call    fcb_name83
 
         ; 同じ名前があれば長さ 0 にし、なければ作る
-        mov     ax, [cur_dir_clus]
+        call    fcb_dirclus
         push    si
         mov     si, name83
         mov     cl, 0
@@ -670,7 +738,7 @@ f_16:
         pop     si
         jnc     .truncate
 
-        mov     ax, [cur_dir_clus]
+        call    fcb_dirclus
         call    dir_alloc_entry
         jc      .fail
         push    si
@@ -725,7 +793,7 @@ f_17:
         call    fcb_name83                      ; 古い名前を name83 へ
 
         ; 探す
-        mov     ax, [cur_dir_clus]
+        call    fcb_dirclus
         push    si
         mov     si, name83
         mov     cl, 0
@@ -823,7 +891,7 @@ f_23:
         call    fcb_get
         call    fcb_name83
 
-        mov     ax, [cur_dir_clus]
+        call    fcb_dirclus
         push    si
         mov     si, name83
         mov     cl, 0
@@ -1315,5 +1383,6 @@ fcb_off:        dw 0
 fcb_attr:       db 0
 fcb_extended:   db 0
 fcb_find_dir:   dw 0
+fcb_find_drive: db 0            ; 検索を始めたドライブ (AH=12h が引き継ぐ)
 fcb_find_idx:   dw 0
 fcb_find_pat:   times 11 db 0

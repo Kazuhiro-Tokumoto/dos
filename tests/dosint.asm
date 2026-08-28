@@ -86,6 +86,7 @@ start:
         call    t_cds
         call    t_buffers
         call    t_country
+        call    t_sda
 
         call    newline
         mov     si, msg_result
@@ -630,6 +631,105 @@ t_country:
 
         jmp     pass
 
+; ---------------------------------------------------------------------------
+; AH=5D06h - SDA (入れ替え可能データ領域)
+;
+; Windows のリアルモードや DOS マルチタスカ、それに常駐ソフトが
+; 「いま DOS を呼んでいいか」を判断するために使う。ここで確かめるのは
+; 返ってきたポインタが飾りではないこと — つまり、AH=34h が返す InDOS
+; フラグと同じ番地を指していて、しかも中の値が生きていること。
+; ---------------------------------------------------------------------------
+t_sda:
+        mov     si, n_sda
+        call    begin
+
+        ; --- AH=34h で InDOS の番地を取っておく ---
+        push    es
+        mov     ah, 0x34
+        int     0x21                    ; ES:BX = InDOS フラグ
+        mov     [indos_seg], es
+        mov     [indos_off], bx
+        pop     es
+
+        ; --- AH=5D06h ---
+        ; 戻り値の DS:SI が指すのは DOS の中なので、値を控えるより先に
+        ; DS を自分のものへ戻さないと、書き込み先が DOS の中になる。
+        push    ds
+        mov     ax, 0x5D06
+        int     0x21
+        mov     bx, ds
+        pop     ds
+        jc      fail
+        mov     [sda_seg], bx
+        mov     [sda_off], si
+        mov     [sda_size], cx
+        mov     [sda_always], dx
+
+        ; SDA+01h が InDOS フラグそのものであること (写しではなく本体)
+        mov     ax, [sda_seg]
+        cmp     ax, [indos_seg]
+        jne     fail
+        mov     ax, [sda_off]
+        inc     ax
+        cmp     ax, [indos_off]
+        jne     fail
+
+        ; 大きさは 0 でなく、常に入れ替える範囲のほうが小さいこと
+        cmp     word [sda_size], 0x18
+        jb      fail
+        mov     ax, [sda_always]
+        cmp     ax, [sda_size]
+        ja      fail
+        test    ax, ax
+        jz      fail
+
+        ; SDA+16h はカレントドライブ。AH=19h と一致するはず
+        push    es
+        mov     es, [sda_seg]
+        mov     di, [sda_off]
+        mov     ah, 0x19
+        int     0x21                    ; AL = カレントドライブ
+        cmp     al, [es:di + 0x16]
+        pop     es
+        jne     fail
+
+        ; SDA+10h はいまの PSP。AH=51h と一致するはず
+        push    es
+        mov     es, [sda_seg]
+        mov     di, [sda_off]
+        mov     ah, 0x51
+        int     0x21                    ; BX = PSP
+        cmp     bx, [es:di + 0x10]
+        pop     es
+        jne     fail
+
+        ; --- AH=5D0Bh: SDA の一覧 ---
+        push    ds
+        mov     ax, 0x5D0B
+        int     0x21
+        mov     bx, ds
+        pop     ds
+        jc      fail
+        mov     [list_seg], bx
+        mov     [list_off], si
+
+        push    es
+        mov     es, [list_seg]
+        mov     di, [list_off]
+        cmp     word [es:di], 1         ; 個数
+        jne     .listbad
+        mov     ax, [es:di + 2]         ; 先頭の SDA のオフセット
+        cmp     ax, [sda_off]
+        jne     .listbad
+        mov     ax, [es:di + 4]         ; セグメント
+        cmp     ax, [sda_seg]
+        jne     .listbad
+        pop     es
+        jmp     pass
+.listbad:
+        pop     es
+        jmp     fail
+
 begin:
         push    si
         mov     si, str_indent
@@ -745,6 +845,15 @@ n_dev:       db 'LoL+22  device chain NUL-CON-AUX-PRN-CLOCK$-block', 0
 n_sft:       db 'LoL+04  SFT chain shows an open file by name', 0
 n_cds:       db 'LoL+16  CDS array follows CHDIR', 0
 n_buf:       db 'LoL+12  disk buffer chain is linked', 0
+n_sda:       db 'AH=5D06h/5D0Bh  the swappable data area is the real one', 0
+indos_seg:   dw 0
+indos_off:   dw 0
+sda_seg:     dw 0
+sda_off:     dw 0
+sda_size:    dw 0
+sda_always:  dw 0
+list_seg:    dw 0
+list_off:    dw 0
 n_country:   db 'AH=65h  the country tables are far pointers, not data', 0
 
 e_nul:       db 'NUL     '

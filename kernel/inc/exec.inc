@@ -1397,7 +1397,6 @@ do_terminate:
 .retaddr: dd 0
 
 ; --- 変数 ------------------------------------------------------------------
-cur_psp:            dw 0        ; いま動いているプロセスの PSP
 term_keep:          db 0        ; 1 なら常駐終了 (メモリとファイルを残す)
 term_keep_paras:    dw 0        ; 常駐で残すパラグラフ数
 last_exit_code:     dw 0        ; AH=4Dh が返す値 (AL=コード, AH=種類)

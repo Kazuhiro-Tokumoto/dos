@@ -27,7 +27,7 @@
 drive_entry:
         push    ax
         push    dx
-        cmp     al, MAX_DRIVES
+        cmp     al, MAX_PHYS_DRIVES
         jae     .bad
         push    ax
         movzx   di, al
@@ -433,7 +433,7 @@ disk_init:
         push    ds
         pop     es
         mov     di, drive_tab
-        mov     cx, MAX_DRIVES * DRV_ENTSIZE
+        mov     cx, MAX_PHYS_DRIVES * DRV_ENTSIZE
         xor     al, al
         rep     stosb
 
@@ -459,7 +459,7 @@ disk_init:
         ; --- ハードディスク (C: 以降) ---
         mov     bl, 0x80
 .hd_loop:
-        cmp     bh, MAX_DRIVES
+        cmp     bh, MAX_PHYS_DRIVES
         jae     .scan_done
         mov     al, bh
         mov     dl, bl
@@ -473,7 +473,7 @@ disk_init:
         call    dpb_relink              ; DPB の連鎖を組み直す
 
         ; 実在するドライブの数を数える (末尾の空きは勘定に入れない)
-        mov     cl, MAX_DRIVES
+        mov     cl, MAX_PHYS_DRIVES
         mov     ch, 0
 .count:
         dec     cl
@@ -507,7 +507,7 @@ disk_init:
         call    drive_select
         jnc     .ok
         inc     al
-        cmp     al, MAX_DRIVES
+        cmp     al, MAX_PHYS_DRIVES
         jb      .find_any
         jmp     .none
 
@@ -615,7 +615,7 @@ drive_try_hd:
 .read_mbr:
         ; MBR を読む。表にまだ載っていないドライブなので、いちばん後ろの
         ; 枠を作業用に使って disk_read を通す。
-        mov     al, MAX_DRIVES - 1
+        mov     al, MAX_PHYS_DRIVES - 1
         call    drive_slot
         mov     dl, [.phys]
         mov     [di + DRV_PHYS], dl
@@ -634,7 +634,7 @@ drive_try_hd:
         mov     bx, sector_buf
         xor     eax, eax
         mov     cx, 1
-        mov     dl, MAX_DRIVES - 1
+        mov     dl, MAX_PHYS_DRIVES - 1
         call    disk_read
         pushf
         mov     byte [di + DRV_FLAGS], 0        ; 作業用の枠は片付ける
@@ -667,7 +667,7 @@ drive_try_hd:
         jc      .part_next
 
         mov     al, [.next]
-        cmp     al, MAX_DRIVES - 1
+        cmp     al, MAX_PHYS_DRIVES - 1
         jae     .part_next
 
         call    drive_slot
@@ -945,7 +945,7 @@ dpb_build:
         mov     al, [bx + DPB_DRIVE]
 .chain:
         inc     al
-        cmp     al, MAX_DRIVES
+        cmp     al, MAX_PHYS_DRIVES
         jae     .chain_done
         push    ax
         call    drive_entry
@@ -1164,7 +1164,7 @@ dpb_relink:
         pop     ax
 .next:
         inc     al
-        cmp     al, MAX_DRIVES
+        cmp     al, MAX_PHYS_DRIVES
         jb      .loop
         pop     di
         pop     ax

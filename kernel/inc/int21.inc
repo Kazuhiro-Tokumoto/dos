@@ -1357,7 +1357,68 @@ f_5C:
 ; ===========================================================================
 ; 5Dh / 5Eh / 5Fh - ネットワーク関連 (ネットワークはないので断る)
 ; ===========================================================================
+; ===========================================================================
+; 5Dh - DOS 内部サービス
+;
+; もともとはネットワークリダイレクタ (MS-NET / LAN Manager) のためのもので、
+; サーバ側が「クライアントの代わりに DOS を呼ぶ」ための入口が並んでいる。
+; その中に 1 つだけ、ネットワークと関係なく広く使われる機能がある。
+; ===========================================================================
 f_5D:
+        mov     al, [u_ax]
+        cmp     al, 0x06
+        je      .get_sda
+        cmp     al, 0x0B
+        je      .get_sda_list
+        cmp     al, 0x0A
+        je      .set_exterr
+        mov     ax, ERR_FUNC
+        jmp     int21_err
+
+; --- 5D06h: SDA の場所と大きさを返す ---------------------------------------
+;   出力: DS:SI = SDA, CX = 中にいる間だけ入れ替える大きさ,
+;         DX = 常に入れ替える大きさ
+;
+; Windows のリアルモードや DOS マルチタスカが、DOS 呼び出しの途中で
+; タスクを切り替えるために使う。TSR も、この先頭 2 バイト (クリティカル
+; エラーフラグと InDOS) だけを見て「いま入っていいか」を判断する。
+.get_sda:
+        mov     ax, cs
+        mov     [u_ds], ax
+        mov     word [u_si], sda_start
+        mov     word [u_cx], SDA_SIZE
+        mov     word [u_dx], SDA_ALWAYS
+        jmp     int21_ok
+
+; --- 5D0Bh: SDA の一覧を返す (DOS 4.0 以降) --------------------------------
+;   出力: DS:SI = 一覧
+;         +00 WORD  個数
+;         +02 DWORD SDA の far ポインタ ┐
+;         +06 WORD  常に入れ替える大きさ ├ 個数ぶん繰り返す
+;         +08 WORD  中にいる間の大きさ  ┘
+;
+; DOS を複数の SDA に分けて持つ実装 (DOS 4.0 のマルチタスク版) があるため、
+; 一覧という形になっている。MYDOS は 1 つしか持たない。
+.get_sda_list:
+        mov     ax, cs
+        mov     [u_ds], ax
+        mov     word [u_si], sda_list
+        jmp     int21_ok
+
+; --- 5D0Ah: 次のエラーで返す拡張エラー情報を差し替える ---------------------
+;   入力: DS:DX = 11 ワード (AX BX CX DX SI DI DS ES 予約 3 つ)
+;
+; リダイレクタが「自分が処理した結果のエラー」を DOS に代弁させるための
+; もの。DS:DX の先頭ワードが、次に AH=59h で返る値になる。
+.set_exterr:
+        push    ds
+        mov     ds, [cs:u_ds]
+        mov     si, [cs:u_dx]
+        mov     ax, [si]
+        pop     ds
+        mov     [last_error], ax
+        jmp     int21_ok
+
 f_5E:
 f_5F:
         mov     ax, ERR_FUNC
@@ -2310,6 +2371,14 @@ dbcs_tab:
         dw      0
         dw      0
 
+; AH=5D0Bh が返す一覧。SDA は 1 つだけ。
+sda_list:
+                dw      1                       ; 個数
+                dw      sda_start               ; far ポインタ (オフセット)
+kernel_seg_ptr: dw      0                       ; セグメントは起動時に埋める
+                dw      SDA_ALWAYS
+                dw      SDA_SIZE
+
 ; --- 変数 ------------------------------------------------------------------
 verify_flag:    db 0
 switch_char:    db '/'
@@ -2317,7 +2386,4 @@ temp_counter:   dw 0
 code_page:      dw 932
 vol_label:      db 'MYDOS      '        ; 11 バイト
                 db 'FAT12   '           ; 8 バイト
-break_flag:     db 0
-indos_flag:     db 0
-last_error:     dw 0
 

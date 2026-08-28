@@ -79,6 +79,12 @@ kernel_main:
         rep     stosb
         pop     cx
         pop     di
+
+        ; SDA のうち 0 が正しくない項目だけ入れ直す。
+        mov     byte [sda_errdrive], 0xFF       ; まだクリティカルエラー無し
+        mov     word [dta_off], PSP_CMDTAIL_LEN ; 既定の DTA は PSP:0080
+        mov     ax, cs
+        mov     [kernel_seg_ptr], ax            ; AH=5D0Bh が返す far ポインタ
         sti
 
         mov     [boot_drive], dl
@@ -717,7 +723,22 @@ int_iret:
 ; ---------------------------------------------------------------------------
 ; INT 25h / 26h - 絶対セクタ読み書き
 ;   AL = ドライブ番号, CX = セクタ数, DX = 開始 LBA, DS:BX = バッファ
-;   終了時、呼び出し元が積んだ FLAGS はスタックに残したまま返す (DOS の仕様)
+;   出力: CF=0 成功 / CF=1 のとき AX = エラーコード
+;
+; この 2 つは DOS の中で唯一「iret で戻らない」割り込みで、INT が積んだ
+; FLAGS をスタックに残したまま retf で返る。呼び出し側が自分で
+;
+;       int     0x25
+;       add     sp, 2           ; または pushf/popf で拾う
+;
+; と後始末をする決まりになっている。なぜそんな形なのかというと、
+; 呼び出し元に CF を返しつつ、割り込み前のフラグも見せたかった名残で、
+; 理由はともかく当時のディスクユーティリティはこの形を前提に書かれている。
+;
+; ここを retf 2 (FLAGS を捨てて返る) にすると、呼び出し側の add sp,2 が
+; 余計にスタックを 2 バイト削る。戻り先アドレスが 2 バイトずれるので、
+; ret した瞬間にどことも知れない場所へ飛ぶ。CHKDSK のように起動直後に
+; 絶対読み込みを走らせるプログラムは、これで無言のまま行方不明になる。
 ; ---------------------------------------------------------------------------
 int25_handler:
         push    ax
@@ -749,7 +770,7 @@ int25_handler:
         pop     ax
         xor     ax, ax
         clc
-        retf    2                       ; FLAGS を残して返る
+        retf                            ; FLAGS はスタックに残したまま返る
 .fail:
         pop     ds
         pop     es
@@ -760,7 +781,7 @@ int25_handler:
         pop     ax
         mov     ax, 0x0C04              ; 一般的な読み取りエラー
         stc
-        retf    2
+        retf
 
 int26_handler:
         push    ax
@@ -792,7 +813,7 @@ int26_handler:
         pop     ax
         xor     ax, ax
         clc
-        retf    2
+        retf
 .fail:
         pop     ds
         pop     es
@@ -803,7 +824,7 @@ int26_handler:
         pop     ax
         mov     ax, 0x0C04
         stc
-        retf    2
+        retf
 
 ; ============================================================================
 ; 各部品
@@ -863,7 +884,6 @@ ret_zf:         db 0                    ; 0=触らない 1=ZF を立てる 2=倒
 boot_psp:       times PSP_SIZE db 0
 
 ; --- バッファ --------------------------------------------------------------
-name83:         times 11 db 0           ; 8.3 に畳んだ作業用の名前
 dir_cur_lba:    dd 0                    ; dir_buf に載っているセクタの LBA
 ; BIOS のディスク転送に渡すバッファは、この「場所だけ確保する」領域
 ; ではなく、必ずカーネルの前のほうに置くこと。
@@ -919,15 +939,12 @@ kernel_bss:
 sft_count:      resb 1                  ; FILES= で決まった実際のエントリ数
 sft_header:     resb 6                  ; 次のテーブルへの far ポインタ + 個数
 sft_table:      resb MAX_SFT_ENTRIES * SFT_ENTSIZE
-drive_tab:      resb MAX_DRIVES * DRV_ENTSIZE        ; ドライブごとの諸元
+drive_tab:      resb MAX_PHYS_DRIVES * DRV_ENTSIZE        ; ドライブごとの諸元
 cds_table:      resb MAX_DRIVES * CDS_ENTSIZE        ; カレントディレクトリの表
-lfn_name:       resb LFN_MAXENT * LFN_CHARS + 2      ; 組み立て中の長い名前
-name_long:      resb LFN_MAXLEN + 1                  ; 照合したい名前
-find_longname:  resb LFN_MAXLEN + 1                  ; 直前に見つけたものの名前
-lfn_states:     resb LFN_SLOTS * LFN_STATE_SIZE      ; 長い名前の検索の状態
-find_pattern_long: resb LFN_MAXLEN + 1               ; 検索パターン (畳む前)
-path_buf:       resb LFN_PATHMAX
-path_buf2:      resb LFN_PATHMAX
+
+; InDOS / カレント PSP / DTA / 作業用バッファは SDA にまとめてある。
+; AH=5D06h でこの場所と大きさを外に教える。
+%include "sda.inc"
 
 kernel_end:
 

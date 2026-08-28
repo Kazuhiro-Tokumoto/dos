@@ -76,6 +76,7 @@ start:
         call    t_extopen
         call    t_truename
         call    t_vollabel
+        call    t_fcb_drive
 
         call    newline
         mov     si, msg_result
@@ -1042,6 +1043,82 @@ t_vollabel:
         pop     ax
         jmp     fail
 
+; ---------------------------------------------------------------------------
+; FCB の先頭 1 バイト (ドライブ番号) が効いているか
+;
+; FCB は 0 = カレントドライブ、1 = A:、2 = B: という数え方をする。
+; ここを見ない実装だと、どのドライブを指しても常にカレントドライブを
+; 開いてしまい、それでもファイルは見つかるので気づけない。
+; A: にしか無いもの / C: にしか無いものを両方から引いて、当たり外れが
+; 逆転することで確かめる。
+;
+;   HELLO.COM    A: にある / C: には無い
+;   ENVTEST.COM  A: にも C: にもある  ← ドライブ判定には使えない
+; ---------------------------------------------------------------------------
+t_fcb_drive:
+        mov     si, n_fcbdrv
+        call    begin
+
+        ; C: が生えていない環境ではこの試験は成立しない。素通しにする。
+        mov     ah, 0x36                ; 空き容量 (AX=FFFFh なら無いドライブ)
+        mov     dl, 3                   ; 1 = A:, 3 = C:
+        int     0x21
+        cmp     ax, 0xFFFF
+        je      pass
+
+        ; (1) ドライブ欄 = 1 (A:) で HELLO.COM → 開けるはず
+        mov     si, f_hello_a
+        call    fcb_try_open
+        jc      fail
+
+        ; (2) ドライブ欄 = 3 (C:) で HELLO.COM → 開けないはず
+        mov     si, f_hello_c
+        call    fcb_try_open
+        jnc     fail
+
+        ; (3) ドライブ欄 = 3 (C:) で ENVTEST.COM → 開けるはず
+        mov     si, f_env_c
+        call    fcb_try_open
+        jc      fail
+
+        ; (4) ドライブ欄 = 0 (カレント = A:) で HELLO.COM → 開けるはず
+        mov     si, f_hello_0
+        call    fcb_try_open
+        jc      fail
+
+        jmp     pass
+
+; DS:SI = 37 バイトの FCB の雛形。作業用にコピーしてから開き、閉じる。
+;   出力: CF=0 なら開けた
+fcb_try_open:
+        push    ax
+        push    cx
+        push    di
+        push    es
+        push    ds
+        pop     es
+        mov     di, drv_fcb
+        mov     cx, 37
+        rep     movsb
+        mov     dx, drv_fcb
+        mov     ah, 0x0F                ; FCB オープン
+        int     0x21
+        cmp     al, 0
+        jne     .no
+        mov     dx, drv_fcb
+        mov     ah, 0x10                ; 開けたなら閉じる
+        int     0x21
+        clc
+        jmp     .out
+.no:
+        stc
+.out:
+        pop     es
+        pop     di
+        pop     cx
+        pop     ax
+        ret
+
 begin:
         push    si
         mov     si, str_indent
@@ -1171,6 +1248,17 @@ n_defdta:    db 'the default DTA is this program PSP:0080, not the parent', 0
 n_vollabel:  db 'AH=11h  an extended FCB finds the volume label', 0
 pat_all:     db '*.*', 0
 defdta_ok:   db 0
+             align 2
+n_fcbdrv:    db 'FCB[0] selects the drive, 1 = A:', 0
+f_hello_a:   db 1, 'HELLO   COM'
+             times 25 db 0
+f_hello_c:   db 3, 'HELLO   COM'
+             times 25 db 0
+f_hello_0:   db 0, 'HELLO   COM'
+             times 25 db 0
+f_env_c:     db 3, 'ENVTEST COM'
+             times 25 db 0
+drv_fcb:     times 37 db 0
              align 2
 vol_fcb:     db 0xFF, 0, 0, 0, 0, 0
              db ATTR_VOLUME

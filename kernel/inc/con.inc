@@ -105,6 +105,19 @@ con_in:
         jmp     .out
 
 .fresh:
+        ; キーが来るまで BIOS の中で寝てしまうと、その間 DOS は完全に
+        ; 止まる。本物の DOS はここで待たずに、押されていなければ
+        ; INT 28h (アイドル割り込み) を鳴らしてから聞き直す。
+        ; 常駐ソフトはこれを合図に自分の仕事をする。プロンプトで
+        ; 止まっている間だけ動くもの — PRINT のスプーラや、Windows 2.x が
+        ; DOS を待たせている間の処理 — はこれが鳴らないと一切動けない。
+.poll:
+        mov     ah, 0x01
+        int     0x16                    ; 覗くだけ (ZF=1 なら何も無い)
+        jnz     .ready
+        int     0x28                    ; DOS アイドル割り込み
+        jmp     .poll
+.ready:
         xor     ah, ah
         int     0x16                    ; AH = スキャンコード, AL = ASCII
         test    al, al

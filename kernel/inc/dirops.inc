@@ -1019,5 +1019,3 @@ get_set_attr:
 cur_dir_clus:   dw 0            ; カレントディレクトリのクラスタ (0 = ルート)
 cur_dir_path:   times 64 db 0   ; カレントディレクトリのパス ("\" を含まない)
 work_path:      times 64 db 0   ; CHDIR の作業用
-dta_seg:        dw 0
-dta_off:        dw 0x0080
