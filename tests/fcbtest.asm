@@ -14,6 +14,7 @@
         bits    16
         org     0x100
 
+ATTR_VOLUME equ 0x08
 RECSIZE equ 128
 NRECS   equ 8                           ; 128 * 8 = 1024 バイト = 2 クラスタ
 
@@ -26,6 +27,31 @@ start:
         mov     ah, 0x4A
         int     0x21
 
+        ; --- 既定の DTA を、自分で動かす前に確かめておく ---
+        ;
+        ; DOS は EXEC のたびに DTA を新しい PSP:0080 に向け直す。ここで
+        ; AH=1Ah を呼んだあとでは元の状態が分からないので、いちばん最初に見る。
+        mov     byte [defdta_ok], 0
+        mov     ah, 0x2F
+        int     0x21                    ; ES:BX = いまの DTA
+        mov     ax, es
+        mov     dx, cs
+        cmp     ax, dx
+        jne     .dta_checked
+        cmp     bx, 0x80
+        jne     .dta_checked
+        ; AH=1Ah を呼ばずに検索して、自分の PSP:0080 に結果が入ること
+        mov     byte [0x80 + 0x1E], 0
+        mov     dx, pat_all
+        xor     cx, cx
+        mov     ah, 0x4E
+        int     0x21
+        jc      .dta_checked
+        cmp     byte [0x80 + 0x1E], 0
+        je      .dta_checked
+        mov     byte [defdta_ok], 1
+.dta_checked:
+
         mov     dx, dta_buf
         mov     ah, 0x1A
         int     0x21
@@ -33,6 +59,7 @@ start:
         mov     si, msg_head
         call    puts
 
+        call    t_default_dta   ; DTA を触る試験より先に
         call    t_psp_fcb
         call    t_parse
         call    t_create_write
@@ -48,6 +75,7 @@ start:
         call    t_createnew
         call    t_extopen
         call    t_truename
+        call    t_vollabel
 
         call    newline
         mov     si, msg_result
@@ -948,6 +976,72 @@ setup_fcb_second:
         pop     ax
         ret
 
+; ============================================================================
+; 既定の DTA は「このプログラムの PSP + 80h」であること
+;
+; DOS は EXEC のたびに DTA を新しい PSP:0080 に向け直す。プログラムが
+; AH=1Ah を呼ばずに検索を使うと、そこへ結果が書かれる。ここを親のまま
+; にしておくと、検索結果が親 (COMMAND.COM) の PSP に書き込まれ、
+; 自分の PSP を読んだプログラムは「何も見つからなかった」と判断する。
+; 当時のユーティリティはだいたい既定の DTA をそのまま使う。
+; ============================================================================
+t_default_dta:
+        mov     si, n_defdta
+        call    begin
+        cmp     byte [defdta_ok], 0
+        je      fail
+        jmp     pass
+
+; ============================================================================
+; 拡張 FCB でボリュームラベルが引けること
+;
+; LABEL のようなプログラムは、属性 8 を立てた拡張 FCB を AH=11h に渡して
+; ラベルを探す。ディレクトリの走査でラベルを無条件に飛ばしていると
+; 見つからない。
+; ============================================================================
+t_vollabel:
+        mov     si, n_vollabel
+        call    begin
+        push    ds
+        pop     es
+        mov     ah, 0x1A                ; DTA を自前の場所に向ける
+        mov     dx, vol_dta
+        int     0x21
+
+        mov     ah, 0x11
+        mov     dx, vol_fcb
+        int     0x21
+        cmp     al, 0
+        jne     .restore_fail
+
+        ; 拡張 FCB の結果: +00 FFh, +06 属性, +07 ドライブ, +08 名前
+        cmp     byte [vol_dta], 0xFF
+        jne     .restore_fail
+        cmp     byte [vol_dta + 6], ATTR_VOLUME
+        jne     .restore_fail
+
+        ; 名前が空白だけではないこと
+        mov     si, vol_dta + 8
+        mov     cx, 11
+.scan:
+        lodsb
+        cmp     al, ' '
+        jne     .have
+        loop    .scan
+        jmp     .restore_fail
+.have:
+        mov     ah, 0x1A                ; DTA を既定に戻す
+        mov     dx, 0x80
+        int     0x21
+        jmp     pass
+.restore_fail:
+        push    ax
+        mov     ah, 0x1A
+        mov     dx, 0x80
+        int     0x21
+        pop     ax
+        jmp     fail
+
 begin:
         push    si
         mov     si, str_indent
@@ -1073,6 +1167,17 @@ n_random:    db 'AH=21h/22h/24h  FCB random read, write, set record', 0
 n_block:     db 'AH=27h  FCB random block read', 0
 n_find:      db 'AH=11h/12h  FCB find first and next', 0
 n_rename:    db 'AH=17h  FCB rename', 0
+n_defdta:    db 'the default DTA is this program PSP:0080, not the parent', 0
+n_vollabel:  db 'AH=11h  an extended FCB finds the volume label', 0
+pat_all:     db '*.*', 0
+defdta_ok:   db 0
+             align 2
+vol_fcb:     db 0xFF, 0, 0, 0, 0, 0
+             db ATTR_VOLUME
+             db 0
+             db '???????????'
+             times 25 db 0
+vol_dta:     times 64 db 0
 n_delete:    db 'AH=13h  FCB delete', 0
 n_dpb:       db 'AH=32h  drive parameter block matches the BPB', 0
 n_alloc:     db 'AH=1Bh  allocation info', 0

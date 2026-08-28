@@ -606,8 +606,18 @@ dir_find:
         jmp     .advance
 
 .real_entry:
+        ; ボリュームラベルは、明示的に求められたときだけ返す。
+        ; LABEL のようなプログラムは、属性 8 を立てた拡張 FCB を
+        ; AH=0Fh に渡してラベルを開きにくる。ここで無条件に飛ばすと
+        ; 「そんなドライブは無い」と言われる。
         test    al, ATTR_VOLUME
-        jnz     .skip
+        jz      .not_volume
+        test    byte [.attr], ATTR_VOLUME
+        jz      .skip
+        jmp     .compare
+.not_volume:
+        test    byte [.attr], ATTR_VOLUME
+        jnz     .skip                   ; ラベルだけを探しているとき
 
         ; ディレクトリを探しているのか、ファイルを探しているのか
         test    al, ATTR_DIRECTORY

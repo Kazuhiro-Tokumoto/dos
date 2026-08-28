@@ -558,6 +558,11 @@ int21_exit:
         je      .tr_ok
         mov     al, 'E'
         call    trace_putc
+        jmp     .tr_ax
+.tr_ok:
+        mov     al, 'o'
+        call    trace_putc
+.tr_ax:
         mov     bx, [u_ax]
         mov     al, bh
         shr     al, 4
@@ -569,10 +574,6 @@ int21_exit:
         call    trace_hexd
         mov     al, bl
         call    trace_hexd
-        jmp     .tr_done
-.tr_ok:
-        mov     al, 'o'
-        call    trace_putc
 .tr_done:
         mov     al, ' '
         call    trace_putc

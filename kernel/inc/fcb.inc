@@ -340,7 +340,7 @@ fcb_open_by_name:
         mov     ax, [cur_dir_clus]
         push    si
         mov     si, name83
-        mov     cl, 0
+        mov     cl, [fcb_attr]          ; 拡張 FCB で指定された属性
         call    dir_find
         pop     si
         jc      .not_found

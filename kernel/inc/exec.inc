@@ -1121,6 +1121,12 @@ prog_load_overlay:
 ; なったときに上書きされてしまうため。
 ; ---------------------------------------------------------------------------
 do_exec:
+        ; 親の DTA を控えておく (子が終わったら戻す)
+        mov     ax, [dta_seg]
+        mov     [exec_parent_dta_seg], ax
+        mov     ax, [dta_off]
+        mov     [exec_parent_dta_off], ax
+
         ; パラメータブロックから必要な値を取り出す
         mov     ax, [es:bx + EPB_ENVSEG]
         mov     [exec_envseg], ax
@@ -1180,6 +1186,22 @@ do_exec:
         mov     ax, [exec_psp]
         mov     [cur_psp], ax
 
+        ; DTA を子の PSP:0080 に向け直す。
+        ;
+        ; DOS の既定の DTA は「いま走っているプログラムの PSP + 80h」で、
+        ; プログラムが AH=1Ah を呼ばずに AH=4Eh や FCB 検索を使うと、
+        ; ここへ結果が書かれる。ここを親のままにしておくと、子の検索結果が
+        ; 親 (COMMAND.COM) の PSP に書き込まれ、子は自分の PSP を読んで
+        ; 「何も見つからなかった」と判断する。当時のユーティリティは
+        ; だいたい既定の DTA をそのまま使うので、まず動かない。
+        mov     ax, [exec_parent_dta_seg]       ; 親のぶんを控えておく
+        mov     [exec_saved_dta_seg], ax
+        mov     ax, [exec_parent_dta_off]
+        mov     [exec_saved_dta_off], ax
+        mov     ax, [exec_psp]
+        mov     [dta_seg], ax
+        mov     word [dta_off], PSP_CMDTAIL_LEN
+
         mov     bx, [exec_stack + 2]
         mov     cx, [exec_stack]
         mov     ss, bx
@@ -1227,6 +1249,12 @@ exec_return:
         ; AH=4Bh を呼ばれたときの入れ子の深さに戻す
         pop     ax
         mov     [indos_flag], al
+
+        ; DTA も親のものに戻す
+        mov     ax, [exec_saved_dta_seg]
+        mov     [dta_seg], ax
+        mov     ax, [exec_saved_dta_off]
+        mov     [dta_off], ax
 
         ; いまの SS:SP が、AH=4Bh を呼んだときの IRET フレームを指している
         mov     [u_ss], ss
@@ -1377,6 +1405,10 @@ exec_psp:           dw 0
 exec_entry:         dd 0        ; 子の入口 (offset, segment)
 exec_stack:         dd 0        ; 子の初期スタック (SP, SS)
 exec_envseg:        dw 0
+exec_parent_dta_seg: dw 0
+exec_parent_dta_off: dw 0
+exec_saved_dta_seg:  dw 0
+exec_saved_dta_off:  dw 0
 exec_psp_cmdsrc:    dd 0        ; コマンドテイルへの far ポインタ
 exe_header:         times MZ_HDRSIZE db 0
 reloc_entry:        dd 0
