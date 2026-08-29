@@ -834,6 +834,24 @@ DOS が押さえている番号なのに BIOS のままにしてあり、`INT 29
 far call の命令であること、`CL=19h` で `call 5` した結果が `AH=19h` と
 一致すること、24h より大きい番号が `AL=0` で返ることを見る。
 
+### 動かし方
+
+OpenGEM 5 の zip を C: の直下に展開する (同梱の `INSTALL.BAT` が
+やっているのも `UNZIP -o OPENGEM5.ZIP -d C:\` だけ)。そのうえで
+
+```
+C:
+CD \GEMAPPS\GEMSYS
+GEMVDI
+```
+
+付属の `GEM.BAT` も中身はこれと同じ。**マウスドライバは読み込まない**
+(GEM.BAT でも既定でコメントアウトされている。CuteMouse を常駐させると
+GEM は FreeDOS 上でも転ぶ)。
+
+いまのところ `C:\GEMAPPS\GEMSYS\CALCLOCK.ACC` は消しておく必要がある
+(下記)。
+
 ### 動いた
 
 この 2 つを直したあと、残っていたのは**デスクアクセサリ 1 本**だった。
