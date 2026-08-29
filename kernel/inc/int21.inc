@@ -627,34 +627,15 @@ f_2B:
 ; 2Ch - 時刻の取得 (CH=時 CL=分 DH=秒 DL=1/100秒)
 ; ===========================================================================
 f_2C:
-        call    rtc_read
-        mov     al, [rtc_min]
-        mov     [u_cx], al
-        mov     al, [rtc_hour]
-        mov     [u_cx + 1], al
-        mov     al, [rtc_sec]
-        mov     [u_dx + 1], al
-
-        ; DL = 1/100 秒。時分秒は RTC から取るが、1/100 秒だけは
-        ; RTC に無いので BIOS のティック (18.2Hz) から作る。
-        ;
-        ; ここを 0 に固定していると、1 秒より細かい間隔を測ろうとする
-        ; プログラムが「時間が進まない」と判断する。当時の時計や
-        ; アニメーションの類が、この欄で経過時間を測っている。
-        push    es
-        xor     ax, ax
-        mov     es, ax
-        mov     ax, [es:0x046C]         ; BIOS のティック数 (下位)
-        xor     dx, dx
-        mov     bx, 18
-        div     bx                      ; DX = 秒の中でのティック (0〜17)
-        mov     ax, dx
-        mov     bx, 100
-        mul     bx
-        mov     bx, 18
-        div     bx                      ; AX = 0〜99
-        mov     [u_dx], al
-        pop     es
+        ; 時刻は RTC ではなく BIOS のティックから作る。そうしないと
+        ; 時分秒と 1/100 秒が別の時計になり、食い違う (time.inc を参照)。
+        push    cx
+        push    dx
+        call    tick_time
+        mov     [u_cx], cx
+        mov     [u_dx], dx
+        pop     dx
+        pop     cx
         jmp     int21_ok
 
 f_2D:

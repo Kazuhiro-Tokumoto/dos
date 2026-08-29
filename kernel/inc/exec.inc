@@ -1298,21 +1298,24 @@ do_exec:
         mov     [es:PSP_STACK], sp
         mov     [es:PSP_STACK + 2], ss
 
-        ; --- INT 22h を「EXEC から戻る」ところへ向ける ---
-        ; 子の PSP には、この時点の INT 22h/23h/24h が保存されている
-        ; (build_psp がそうしている)。子が AH=4Ch を呼ぶと DOS はそれを
-        ; IVT へ書き戻し、その先へジャンプする。
-        push    ds
-        xor     ax, ax
-        mov     ds, ax
-        mov     word [INT_TERM_ADDR * 4], exec_return
-        mov     [INT_TERM_ADDR * 4 + 2], cs
-        pop     ds
-
-        ; 子の PSP に、いま設定した INT 22h を入れ直す
-        mov     es, [exec_psp]
-        mov     word [es:PSP_INT22], exec_return
-        mov     [es:PSP_INT22 + 2], cs
+        ; --- 戻り先は INT 22h ではなく、こちらで覚えておく ---
+        ;
+        ; 以前はここで IVT の INT 22h を exec_return に書き換え、子の PSP に
+        ; も同じ値を入れていた。戻ってくる場所としては合っているが、
+        ; 本物の DOS はそんなことをしない。DOS が子の PSP に写すのは
+        ; 「EXEC を呼んだ時点の INT 22h」であって、親が自分で立てた値が
+        ; そのまま残る。
+        ;
+        ; GEM はまさにそれを当てにしていて、EXEC の直前に INT 22h を
+        ; 自分の戻り先へ向ける。FreeDOS の上で DESKTOP.APP の PSP を
+        ; 覗くと +0Ah に GEM の番地 (26CC:F783) が入っているのに、
+        ; MYDOS では DOS 自身の番地が入っていた。当時のプログラムが
+        ; 子の PSP からこの値を読むことは珍しくないので、本物と同じに
+        ; しておく。
+        ;
+        ; 戻り先は exec_depth で数える。0 でなければ EXEC の子なので
+        ; exec_return へ、0 なら PSP の INT 22h へ飛ぶ (do_terminate)。
+        inc     byte [exec_depth]
 
         ; --- 子へ制御を渡す ---
         mov     ax, [exec_psp]
@@ -1472,9 +1475,19 @@ do_terminate:
         mov     [INT_CRITERR * 4], eax
         pop     ds
 
-        ; 戻り先を控えておく (メモリを解放すると PSP が読めなくなるため)
+        ; 戻り先を控えておく (メモリを解放すると PSP が読めなくなるため)。
+        ; EXEC で起動された子なら、親の AH=4Bh から返す場所へ戻る。
+        ; そうでなければ PSP に入っている INT 22h の先へ飛ぶ。
+        cmp     byte [exec_depth], 0
+        je      .use_psp_vector
+        dec     byte [exec_depth]
+        mov     word [.retaddr], exec_return
+        mov     [.retaddr + 2], cs
+        jmp     .retaddr_done
+.use_psp_vector:
         mov     eax, [es:PSP_INT22]
         mov     [.retaddr], eax
+.retaddr_done:
         mov     ax, [es:PSP_PARENT]
         mov     [.parent], ax
 
@@ -1548,6 +1561,7 @@ do_terminate:
 term_keep:          db 0        ; 1 なら常駐終了 (メモリとファイルを残す)
 term_keep_paras:    dw 0        ; 常駐で残すパラグラフ数
 last_exit_code:     dw 0        ; AH=4Dh が返す値 (AL=コード, AH=種類)
+exec_depth:         db 0        ; EXEC で起動した子の入れ子の深さ
 exec_psp:           dw 0
 exec_entry:         dd 0        ; 子の入口 (offset, segment)
 exec_stack:         dd 0        ; 子の初期スタック (SP, SS)

@@ -93,6 +93,88 @@ rtc_read:
         ret
 
 ; ---------------------------------------------------------------------------
+; tick_time - BIOS のティックから時刻を作る
+;   出力: CH = 時, CL = 分, DH = 秒, DL = 1/100 秒
+;
+; 本物の DOS は時刻を RTC ではなく BIOS のティック (18.2Hz) から作る。
+; RTC には 1/100 秒が無いので、時分秒を RTC から取り、1/100 秒だけ
+; ティックから取ると、2 つの時計が食い違う。1 秒の境目で 1/100 秒が
+; 秒に対して前後するので、1 秒より細かい間隔を「今回 - 前回」で測る
+; プログラムは、そこで負の値や桁の外れた値を掴む。
+;
+; GEM のデスクアクセサリ (時計と電卓) がこれだった。掴んだ値をそのまま
+; 転送する語数に使うので、GEM のブロック転送が 1 万語を超える暴走をして
+; メモリを壊していた。
+;
+; 1 ティック = 65536/1193180 秒なので 1/100 秒は ティック * 5.49254。
+; 32bit で溢れないように 5 + 985/2000 に分けて計算する
+; (誤差は 1 日で 0.6 秒ほど。本物の DOS の時計も同程度にずれる)。
+; ---------------------------------------------------------------------------
+tick_time:
+        push    eax
+        push    ebx
+        push    ecx
+        push    edx
+        push    esi
+        push    es
+
+        xor     ax, ax
+        mov     es, ax
+        mov     eax, [es:0x046C]        ; BIOS のティック数
+        mov     esi, eax
+
+        mov     ebx, eax
+        shl     ebx, 2
+        add     ebx, eax                ; EBX = ティック * 5
+
+        mov     eax, esi
+        mov     ecx, 985
+        xor     edx, edx
+        mul     ecx
+        mov     ecx, 2000
+        div     ecx                     ; EAX = ティック * 985 / 2000
+        add     eax, ebx                ; EAX = 総 1/100 秒
+
+        xor     edx, edx
+        mov     ecx, 8640000
+        div     ecx                     ; EDX = 1 日の中の 1/100 秒
+        mov     eax, edx
+
+        xor     edx, edx
+        mov     ecx, 100
+        div     ecx
+        mov     [tick_hund], dl
+
+        xor     edx, edx
+        mov     ecx, 60
+        div     ecx
+        mov     [tick_sec], dl
+
+        xor     edx, edx
+        mov     ecx, 60
+        div     ecx                     ; EAX = 時, EDX = 分
+        mov     [tick_min], dl
+        mov     [tick_hour], al
+
+        pop     es
+        pop     esi
+        pop     edx
+        pop     ecx
+        pop     ebx
+        pop     eax
+
+        mov     ch, [tick_hour]
+        mov     cl, [tick_min]
+        mov     dh, [tick_sec]
+        mov     dl, [tick_hund]
+        ret
+
+tick_hour:  db 0
+tick_min:   db 0
+tick_sec:   db 0
+tick_hund:  db 0
+
+; ---------------------------------------------------------------------------
 ; get_dos_time - 現在時刻を DOS のディレクトリエントリ形式で返す
 ;   出力: AX = (時 << 11) | (分 << 5) | (秒 / 2)
 ; ---------------------------------------------------------------------------
