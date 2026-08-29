@@ -79,10 +79,20 @@ build_psp:
         mov     ax, [.memtop]
         mov     [es:PSP_MEMTOP], ax
 
-        ; +05: CP/M 互換の far call (今となっては誰も使わないが形は残す)
+        ; +05: CP/M 形式の呼び出し口への far call。
+        ;
+        ; CP/M からの移植ものは、DOS を INT 21h ではなく「PSP:0005 への
+        ; near call」で呼ぶ (機能番号は CL)。ここが本物の入口を指していないと、
+        ; そういうプログラムは DOS の代わりに出鱈目な番地へ飛ぶ。
+        ; 飛び先の 0000:00C0 には install_vectors が jmp far を置いてある。
+        ;
+        ; GEM のデスクトップがこれだった。1980 年代のプログラムなので
+        ; call 5 を使っており、ここが BIOS を指していたために、
+        ; 背景とタイトルバーを描いたところで BIOS の中へ飛んで行方不明に
+        ; なっていた。
         mov     byte [es:PSP_CPM_CALL], 0x9A
-        mov     word [es:PSP_CPM_CALL + 1], 0xFEF0
-        mov     word [es:PSP_CPM_CALL + 3], 0xF000
+        mov     word [es:PSP_CPM_CALL + 1], 0x00C0
+        mov     word [es:PSP_CPM_CALL + 3], 0x0000
 
         ; +0A/0E/12: 終了・Ctrl-C・クリティカルエラーのベクタを保存する。
         ; プログラムがこれらを書き換えたまま終了しても、DOS が PSP から
@@ -1247,6 +1257,22 @@ do_exec:
         mov     ax, [exec_psp]
         mov     [dta_seg], ax
         mov     word [dta_off], PSP_CMDTAIL_LEN
+
+        ; 子は「DOS の中」ではないので、入れ子の深さを 0 に戻す。
+        ;
+        ; AH=4Bh は子が終わるまで戻ってこない呼び出しなので、そのままだと
+        ; 親の 1 段が積まれたまま子が走ることになる。子がまた子を起動すれば
+        ; 2 段、3 段と積み上がり、INT21_STACKS に達したところで DOS が
+        ; 呼び出しを受け付けなくなる (機能番号が違うと言って返す)。
+        ;
+        ; GEM がまさにこれだった。COMMAND.COM → GEMVDI → GEM.EXE →
+        ; DESKTOP.APP と 3 段重なり、デスクトップが最初に DOS を呼んだ
+        ; ところで「機能番号が違う」で弾かれ、画面は背景とタイトルバーを
+        ; 出したまま何も起きなくなっていた。
+        ;
+        ; ここで積んだ深さは exec_return で書き戻すので、親から見た
+        ; 深さは変わらない。
+        mov     byte [indos_flag], 0
 
         mov     bx, [exec_stack + 2]
         mov     cx, [exec_stack]

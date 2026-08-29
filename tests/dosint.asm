@@ -89,6 +89,7 @@ start:
         call    t_sda
         call    t_dbcs
         call    t_memstrat
+        call    t_cpm
 
         call    newline
         mov     si, msg_result
@@ -733,6 +734,48 @@ t_sda:
         jmp     fail
 
 ; ---------------------------------------------------------------------------
+; PSP+05h - CP/M 形式の呼び出し口
+;
+; CP/M からの移植ものは、DOS を INT 21h ではなく「PSP:0005 への near call」で
+; 呼ぶ。機能番号は AH ではなく CL に入れ、使えるのは 0〜24h まで。
+; PSP:0005 には far call が埋め込んであり、その飛び先が DOS の入口になる。
+;
+; ここが本物の入口を指していないと、そういうプログラムは DOS の代わりに
+; 出鱈目な番地へ飛ぶ。GEM のデスクトップがまさにこれで、飛び先が BIOS を
+; 指していたために、画面を描き始めたところで行方不明になっていた。
+;
+; .COM は CS = PSP なので、call 5 がそのまま PSP:0005 に届く。
+; ---------------------------------------------------------------------------
+t_cpm:
+        mov     si, n_cpm
+        call    begin
+
+        ; PSP:0005 は far call の命令でなければならない
+        cmp     byte [0x0005], 0x9A
+        jne     fail
+
+        ; まず普通に、いまのドライブを聞いておく
+        mov     ah, 0x19
+        int     0x21
+        mov     [cpm_drive], al
+
+        ; 同じことを CP/M 形式で聞く (機能番号は CL)
+        mov     cx, 0x0019
+        xor     ax, ax
+        call    0x0005
+        cmp     al, [cpm_drive]
+        jne     fail
+
+        ; 24h より大きい番号は AL=0 で返る約束
+        mov     cx, 0x0030
+        mov     al, 0xFF
+        call    0x0005
+        test    al, al
+        jnz     fail
+
+        jmp     pass
+
+; ---------------------------------------------------------------------------
 ; AH=63h - 2 バイト文字 (DBCS) の先頭バイト表
 ;
 ; 表は「先頭バイトになりうる範囲」の組を並べ、0 の組で終わる。2 バイト文字を
@@ -993,6 +1036,8 @@ n_dbcs:      db 'AH=63h  the DBCS table pointer really is replaced', 0
 dbcs_seg:    dw 0
 dbcs_off:    dw 0
 dbcs_decoy:  times 8 db 0xFF
+n_cpm:       db 'PSP+05  the CP/M style call reaches DOS', 0
+cpm_drive:   db 0
 n_sda:       db 'AH=5D06h/5D0Bh  the swappable data area is the real one', 0
 indos_seg:   dw 0
 indos_off:   dw 0

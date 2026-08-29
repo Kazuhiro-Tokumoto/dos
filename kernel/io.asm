@@ -384,6 +384,30 @@ install_vectors:
         mov     word [es:bx], int2f_handler
         mov     [es:bx + 2], cs
 
+        mov     bx, INT_FASTCON * 4
+        mov     word [es:bx], int29_handler
+        mov     [es:bx + 2], cs
+
+        ; 2Ah〜2Eh は DOS が押さえている番号。中身は無くても、iret へ
+        ; 向けておかないと BIOS の適当な場所へ飛ぶ。
+        mov     bx, 0x2A * 4
+.reserve:
+        mov     word [es:bx], int_iret
+        mov     [es:bx + 2], cs
+        add     bx, 4
+        cmp     bx, 0x2F * 4
+        jb      .reserve
+
+        ; --- CP/M 形式の呼び出し口を 0000:00C0 に置く ---
+        ;
+        ; PSP:0005 の far call はここを指す。DOS もここを使っており
+        ; (INT 30h/31h のベクタの場所を、コードとして流用している)、
+        ; PSP に埋め込む番地が固定になるので都合がよい。
+        mov     bx, 0x00C0
+        mov     byte [es:bx], 0xEA              ; jmp far
+        mov     word [es:bx + 1], cpm_entry
+        mov     [es:bx + 3], cs
+
         pop     es
         pop     bx
         pop     ax
@@ -520,6 +544,19 @@ int21_handler:
         mov     ss, ax
         mov     sp, kernel_stack_top - (INT21_STACKS - 1) * INT21_STKSIZE
         inc     byte [indos_flag]
+%ifdef DEEP_TRACE
+        push    ax
+        mov     al, '<'
+        call    trace_putc
+        mov     al, 'D'
+        call    trace_putc
+        mov     al, [indos_flag]
+        add     al, '0'
+        call    trace_putc
+        mov     al, '>'
+        call    trace_putc
+        pop     ax
+%endif
         mov     word [u_ax], ERR_FUNC
         mov     byte [ret_cf], 1
         mov     byte [ret_zf], 0
@@ -718,6 +755,61 @@ int2f_handler:
         iret
 
 int_iret:
+        iret
+
+; INT 29h - 高速コンソール出力。AL の文字をそのまま画面へ出す。
+;
+; DOS 自身と、当時のプログラムの一部がここを直接呼ぶ。繋いでおかないと
+; BIOS の「何もしない iret」に落ちて、文字が黙って消える。
+int29_handler:
+        push    ds
+        push    cs
+        pop     ds
+        call    con_out
+        pop     ds
+        iret
+
+; ---------------------------------------------------------------------------
+; cpm_entry - CP/M 形式の呼び出し口
+;
+; CP/M からの移植ものは、DOS を INT 21h ではなく「PSP:0005 への near call」
+; で呼ぶ。機能番号は AH ではなく CL に入れ、0〜24h だけが使える。
+; PSP:0005 には far call が埋め込んであり、その飛び先がここになる。
+;
+; プログラムが call 5 をした時点でスタックはこうなっている
+; (上が新しい):
+;
+;       000Ah           ← 埋め込んだ far call が積んだ復帰オフセット。
+;                         PSP の中のデータを指すだけで意味がないので捨てる
+;       PSP セグメント  ← 同じく far call が積んだ CS。.COM なら
+;                         プログラムのセグメントと同じ
+;       復帰オフセット  ← プログラムの near call が積んだもの
+;
+; これを INT 21h と同じ形 (オフセット / セグメント / フラグ) に組み替えて
+; そのまま int21_handler へ渡す。最後の iret で呼び出し元へ戻る。
+; ---------------------------------------------------------------------------
+cpm_entry:
+        add     sp, 2                   ; 意味のない 000Ah を捨てる
+        pushf
+        push    bp
+        mov     bp, sp
+        ;   [bp + 0] = 退避した BP
+        ;   [bp + 2] = フラグ
+        ;   [bp + 4] = PSP セグメント
+        ;   [bp + 6] = 復帰オフセット
+        push    ax
+        mov     ax, [bp + 2]            ; フラグ
+        xchg    ax, [bp + 6]            ; 復帰オフセットと入れ替える
+        mov     [bp + 2], ax
+        pop     ax
+        pop     bp
+        ; これで下から オフセット / セグメント / フラグ の順になった
+        cmp     cl, 0x24                ; 使えるのは 0〜24h だけ
+        ja      .bad
+        mov     ah, cl
+        jmp     int21_handler
+.bad:
+        mov     al, 0
         iret
 
 ; ---------------------------------------------------------------------------
