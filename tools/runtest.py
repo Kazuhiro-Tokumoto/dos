@@ -25,6 +25,7 @@ REQUIRED = [
     ("Hello from HELLO.COM", ".COM プログラムの起動"),
     ("HELLO.EXE started", ".EXE プログラムの起動"),
     ("EXE-RELOC: PASS", ".EXE のリロケーション適用"),
+    ("EXE-MEMTOP: PASS", ".EXE に渡すメモリをページ単位で数えている"),
     ("MYDOS - an MS-DOS compatible", "TYPE によるファイル表示"),
     ("1 file(s) copied", "COPY"),
     ("bytes in largest free block", "MEM (MCB 連鎖の走査)"),

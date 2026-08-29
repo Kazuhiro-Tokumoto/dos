@@ -621,10 +621,37 @@ prog_load:
         jbe     .bad_exe
         mov     [.imgsize], eax
 
-        ; イメージをパラグラフ単位に切り上げる
-        add     eax, 15
-        shr     eax, 4
+        ; --- 場所をいくつ取るかを求める ---
+        ;
+        ; 読み込むバイト数からではなく、ページ数から数える。DOS は半端な
+        ; 最終ページを切り上げ、512 バイト単位で場所を取るからである。
+        ;
+        ;   パラグラフ数 = ページ数 * 32 - ヘッダのパラグラフ数
+        ;
+        ; ここを「実際に読むバイト数を 16 で割った値」にすると、最終ページの
+        ; 半端なぶんだけ確保が小さくなる。プログラムから見ると PSP:0002 が
+        ; 本来より下を指すことになり、そこを上限として自分のスタックを
+        ; 置くプログラム (当時の常駐ソフトの定石) が、すぐ上にある次の MCB
+        ; を踏む。CuteMouse がまさにこれで、常駐したあとの確保がすべて
+        ; 「MCB が壊れている」で返るようになっていた。
+        ;
+        ; 16bit で計算するのは意図的で、ページ数が 2048 以上のときに
+        ; 上位が落ちる。1MB を超えるイメージを持つ NE の DOS スタブは
+        ; 「1MB で割った余りだけ読む」作りになっているので、この桁あふれが
+        ; そのまま正しい動きになる。
+        mov     ax, [exe_header + MZ_PAGES]
+        shl     ax, 5                   ; ページ数 * 32 = パラグラフ数
+        sub     ax, [exe_header + MZ_HDRPARAS]
+        jbe     .bad_exe
         mov     [.imgparas], ax
+
+        ; 読む長さが確保した長さを超えないようにしておく
+        movzx   ecx, ax
+        shl     ecx, 4
+        cmp     [.imgsize], ecx
+        jbe     .size_ok
+        mov     [.imgsize], ecx
+.size_ok:
 
         ; --- 必要なメモリを決める ---
         ;   PSP(16) + イメージ + min_alloc が最低限、
@@ -646,6 +673,15 @@ prog_load:
         mov     eax, 0xFFFF             ; 0xFFFF 指定は「空き全部」の意味
 .max_ok:
         mov     [.maxparas], ax
+
+        ; min も max も 0 のときは、DOS は空きをすべて渡し、その中の
+        ; いちばん上にイメージを置く。RBIL に載っている作法で、これを
+        ; 前提にしているプログラムが実在する。
+        mov     ax, [exe_header + MZ_MINALLOC]
+        or      ax, [exe_header + MZ_MAXALLOC]
+        jnz     .alloc_ready
+        mov     word [.maxparas], 0xFFFF
+.alloc_ready:
 
         call    mem_largest             ; AX = 確保できる最大
         cmp     ax, [.minparas]
@@ -678,6 +714,16 @@ prog_load:
 
         mov     ax, [.psp]
         add     ax, PSP_SIZE / 16
+        ; min も max も 0 なら、確保したブロックのいちばん上に置く
+        mov     cx, [exe_header + MZ_MINALLOC]
+        or      cx, [exe_header + MZ_MAXALLOC]
+        jnz     .load_low
+        mov     cx, [.paras]
+        sub     cx, PSP_SIZE / 16
+        sub     cx, [.imgparas]
+        jbe     .load_low
+        add     ax, cx
+.load_low:
         mov     [.loadseg], ax          ; イメージの置き場所
         mov     dx, ax
         mov     bx, [.handle]

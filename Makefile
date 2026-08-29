@@ -37,7 +37,7 @@ KERNEL_DBG := $(BUILD)/io-debug.sys
 SHELL_COM := $(BUILD)/command.com
 
 # ディスクに入れるテストプログラム
-PROGS := $(BUILD)/hello.com $(BUILD)/hello.exe $(BUILD)/dostest.com \
+PROGS := $(BUILD)/hello.com $(BUILD)/hello.exe $(BUILD)/exetop.exe $(BUILD)/dostest.com \
          $(BUILD)/fcbtest.com $(BUILD)/tsrtest.com $(BUILD)/ovltest.com \
          $(BUILD)/dosint.com $(BUILD)/hdtest.com $(BUILD)/cfgtest.com \
          $(BUILD)/instest.com $(BUILD)/xmstest.com $(BUILD)/envtest.com \
@@ -104,6 +104,12 @@ $(BUILD)/%.sys: drivers/%.asm | $(BUILD)
 	$(NASM) $(NASMFLAGS) $< -o $@
 
 # オーバーレイも MZ 形式。AH=4Bh AL=3 はリロケーションだけを当てる。
+# min_alloc = max_alloc にしてあるので、確保されるパラグラフ数が一意に決まる。
+# 最終ページが半端になる大きさにしてあり、ページ切り上げの有無で値が変わる。
+$(BUILD)/exetop.exe: tests/exetop.asm tools/mkexe.py | $(BUILD)
+	$(NASM) $(NASMFLAGS) tests/exetop.asm -o $(BUILD)/exetop.bin
+	$(PYTHON) tools/mkexe.py $(BUILD)/exetop.bin -o $@ --min-alloc 0x20 --max-alloc 0x20 -v
+
 $(BUILD)/ovl.ovl: tests/ovlbody.asm tools/mkexe.py | $(BUILD)
 	$(NASM) $(NASMFLAGS) tests/ovlbody.asm -o $(BUILD)/ovlbody.bin
 	$(PYTHON) tools/mkexe.py $(BUILD)/ovlbody.bin -o $@ -v
@@ -120,6 +126,7 @@ define make_image
 	$(MCOPY) -i $(1) -o $(SHELL_COM) ::COMMAND.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/hello.com ::HELLO.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/hello.exe ::HELLO.EXE
+	$(MCOPY) -i $(1) -o $(BUILD)/exetop.exe ::EXETOP.EXE
 	$(MCOPY) -i $(1) -o $(BUILD)/dostest.com ::DOSTEST.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/fcbtest.com ::FCBTEST.COM
 	$(MCOPY) -i $(1) -o $(BUILD)/tsrtest.com ::TSRTEST.COM
