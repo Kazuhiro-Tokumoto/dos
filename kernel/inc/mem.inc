@@ -27,6 +27,9 @@ mem_init:
         push    es
 
         mov     [first_mcb], ax
+%ifdef CHAIN_CHECK
+        mov     [mcb_canary], ax
+%endif
         mov     es, ax
 
         xor     di, di
@@ -599,5 +602,8 @@ mem_largest:
         ret
 
 ; --- 変数 ------------------------------------------------------------------
-first_mcb:      dw 0            ; 連鎖の先頭 MCB のセグメント
+first_mcb:      dw 0
+%ifdef CHAIN_CHECK
+mcb_canary:     dw 0
+%endif            ; 連鎖の先頭 MCB のセグメント
 alloc_strategy: db FIT_FIRST

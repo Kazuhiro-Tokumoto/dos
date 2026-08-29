@@ -496,6 +496,10 @@ prog_load:
         push    dx
         push    di
         push    es
+%ifdef CHAIN_CHECK
+        mov     byte [chain_where], 'A'
+        call    chain_check
+%endif
 
         ; 子に渡すフルパスを、path_buf がまだ残っているうちに控える。
         call    exec_save_fullpath
@@ -518,6 +522,10 @@ prog_load:
         call    env_make_child
         mov     [exec_child_env], dx
         pop     dx
+%ifdef CHAIN_CHECK
+        mov     byte [chain_where], 'B'
+        call    chain_check
+%endif
 
         ; --- ファイルを開く ---
         xor     al, al                  ; 読み取り専用
@@ -534,6 +542,10 @@ prog_load:
         call    file_read
         jc      .read_err
         mov     [.hdrlen], ax
+%ifdef CHAIN_CHECK
+        mov     byte [chain_where], 'C'
+        call    chain_check
+%endif
 
         cmp     ax, MZ_HDRSIZE
         jb      .as_com                 ; 28 バイトもないなら .COM
@@ -1117,7 +1129,61 @@ prog_load_overlay:
         call    prog_load.apply_relocs
         mov     word [reloc_factor], 0xFFFF     ; 既定 (= ロード先を使う) に戻す
         jc      .read_err
+%ifdef INT21_TRACE_ALL
+        call    .trace_ovl
+%endif
         jmp     .done
+
+%ifdef INT21_TRACE_ALL
+; 読み込んだオーバーレイの素性を出す (調査用)
+.trace_ovl:
+        pusha
+        push    ds
+        push    es
+        push    cs
+        pop     ds
+        mov     al, '['
+        call    trace_putc
+        mov     bx, [.loadseg]
+        call    trace_hexw
+        mov     al, '+'
+        call    trace_putc
+        mov     bx, [.relocfac]
+        call    trace_hexw
+        mov     al, '+'
+        call    trace_putc
+        mov     bx, [.imgsize + 2]
+        call    trace_hexw
+        mov     bx, [.imgsize]
+        call    trace_hexw
+        mov     al, '='
+        call    trace_putc
+        mov     es, [.loadseg]
+        xor     di, di
+        xor     dx, dx
+        mov     ecx, [.imgsize]
+.sumloop:
+        mov     al, [es:di]
+        movzx   bx, al
+        add     dx, bx
+        rol     dx, 1
+        inc     di
+        jnz     .nowrap
+        mov     bx, es
+        add     bx, 0x1000
+        mov     es, bx
+.nowrap:
+        dec     ecx
+        jnz     .sumloop
+        mov     bx, dx
+        call    trace_hexw
+        mov     al, ']'
+        call    trace_putc
+        pop     es
+        pop     ds
+        popa
+        ret
+%endif
 
 .flat:
         ; .COM 形式のオーバーレイ。先頭から丸ごと読むだけ

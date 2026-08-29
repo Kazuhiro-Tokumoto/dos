@@ -44,19 +44,96 @@ int21_dispatch:
         call    trace_putc
         mov     bx, [u_es]
         call    trace_hexw
+        ; 呼び出し元の CS:IP も出す。実物のプログラムがどこで DOS を
+        ; 呼んでいるかが分からないと、暴走した後で追いようがない。
+        mov     al, '@'
+        call    trace_putc
+        push    es
+        mov     es, [u_ss]
+        mov     di, [u_sp]
+        mov     bx, [es:di + 2]
+        call    trace_hexw
+        mov     al, ':'
+        call    trace_putc
+        mov     bx, [es:di]
+        call    trace_hexw
+        pop     es
         mov     al, ' '
         call    trace_putc
         pop     ds
         popa
 %endif
+%ifdef CHAIN_CHECK
+        mov     byte [chain_where], '<'
+        call    chain_check
+%endif
         movzx   bx, byte [u_ax + 1]     ; AH = 機能番号
         shl     bx, 1
         jmp     [int21_table + bx]
+
+%ifdef CHAIN_CHECK
+; MCB 連鎖が壊れた最初の瞬間に、呼び出し元の CS:IP を出す (調査用)
+chain_check:
+        cmp     byte [chain_broken], 0
+        jne     .out
+        pusha
+        push    ds
+        push    es
+        push    cs
+        pop     ds
+        ; 起動時に控えた first_mcb と食い違ったら、そこで報告する
+        mov     ax, [first_mcb]
+        cmp     ax, [mcb_canary]
+        je      .ok
+        mov     byte [chain_broken], 1
+        mov     al, 10
+        call    trace_putc
+        mov     al, [chain_where]
+        call    trace_putc
+        mov     al, '#'
+        call    trace_putc
+        mov     bx, ax
+        mov     bx, [first_mcb]
+        call    trace_hexw              ; 化けた値
+        mov     al, '@'
+        call    trace_putc
+        mov     es, [u_ss]
+        mov     di, [u_sp]
+        mov     bx, [es:di + 2]         ; 呼び出し元 CS
+        call    trace_hexw
+        mov     al, ':'
+        call    trace_putc
+        mov     bx, [es:di]             ; 呼び出し元 IP
+        call    trace_hexw
+        mov     al, '/'
+        call    trace_putc
+        mov     bx, [u_ax]
+        call    trace_hexw
+        mov     al, '#'
+        call    trace_putc
+        mov     al, 10
+        call    trace_putc
+.ok:
+        pop     es
+        pop     ds
+        popa
+.out:
+        ret
+chain_broken: db 0
+chain_where:  db '<'
+%endif
 
 ; ---------------------------------------------------------------------------
 ; 共通の出口
 ; ---------------------------------------------------------------------------
 int21_ok:
+%ifdef CHAIN_CHECK
+        push    ax
+        mov     al, '>'
+        mov     [chain_where], al
+        pop     ax
+        call    chain_check
+%endif
         mov     byte [ret_cf], 0
         jmp     int21_exit
 
