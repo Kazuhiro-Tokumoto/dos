@@ -90,6 +90,7 @@ start:
         call    t_dbcs
         call    t_memstrat
         call    t_cpm
+        call    t_memtop
 
         call    newline
         mov     si, msg_result
@@ -734,6 +735,66 @@ t_sda:
         jmp     fail
 
 ; ---------------------------------------------------------------------------
+; MCB 連鎖の終わり - BIOS が申告する RAM の末尾と一致すること
+;
+; 640KB 決め打ちにはできない。BIOS は EBDA (拡張 BIOS データ領域) を
+; 640KB のすぐ下に置くことがあり、そこには PS/2 マウスの状態や
+; ハードディスクの諸元表が入っている。BIOS は 0040:0013 に「使える
+; 大きさ (KB)」を書いてあり、EBDA がある機械では 640 ではなく 639 になる。
+;
+; ここを 0xA000 に決め打ちしていると、上のほうまで使うプログラムが
+; EBDA を踏み、そのあと BIOS が出鱈目な値を返すようになる。
+; ---------------------------------------------------------------------------
+t_memtop:
+        mov     si, n_memtop
+        call    begin
+
+        ; BIOS の申告 (KB) をパラグラフに直す
+        push    es
+        xor     ax, ax
+        mov     es, ax
+        mov     ax, [es:0x0413]
+        pop     es
+        mov     cl, 6
+        shl     ax, cl                  ; KB * 64
+        mov     [mt_bios], ax
+
+        ; MCB 連鎖の先頭を List of Lists から取る
+        push    es
+        mov     ah, 0x52
+        int     0x21                    ; ES:BX = LoL
+        mov     ax, [es:bx - 2]         ; LoL-2 = 最初の MCB
+        pop     es
+        mov     [mt_seg], ax
+
+        ; 'Z' まで辿って、末尾のセグメントを求める
+        mov     cx, 200
+.walk:
+        push    es
+        mov     es, [mt_seg]
+        mov     al, [es:0]
+        mov     dx, [es:3]
+        pop     es
+        cmp     al, 0x5A                ; 'Z'
+        je      .last
+        cmp     al, 0x4D                ; 'M'
+        jne     fail
+        mov     ax, [mt_seg]
+        add     ax, dx
+        inc     ax
+        mov     [mt_seg], ax
+        loop    .walk
+        jmp     fail
+.last:
+        ; 末尾 = 最後の MCB + 1 + 大きさ
+        mov     ax, [mt_seg]
+        add     ax, dx
+        inc     ax
+        cmp     ax, [mt_bios]
+        jne     fail
+        jmp     pass
+
+; ---------------------------------------------------------------------------
 ; PSP+05h - CP/M 形式の呼び出し口
 ;
 ; CP/M からの移植ものは、DOS を INT 21h ではなく「PSP:0005 への near call」で
@@ -1036,8 +1097,11 @@ n_dbcs:      db 'AH=63h  the DBCS table pointer really is replaced', 0
 dbcs_seg:    dw 0
 dbcs_off:    dw 0
 dbcs_decoy:  times 8 db 0xFF
+n_memtop:    db 'MCB     the arena stops where the BIOS says RAM ends', 0
 n_cpm:       db 'PSP+05  the CP/M style call reaches DOS', 0
 cpm_drive:   db 0
+mt_bios:     dw 0
+mt_seg:      dw 0
 n_sda:       db 'AH=5D06h/5D0Bh  the swappable data area is the real one', 0
 indos_seg:   dw 0
 indos_off:   dw 0

@@ -73,6 +73,56 @@ int21_dispatch:
 
 %ifdef CHAIN_CHECK
 ; MCB 連鎖が壊れた最初の瞬間に、呼び出し元の CS:IP を出す (調査用)
+; 連鎖をぜんぶ出す (調査用)
+chain_dump:
+        pusha
+        push    ds
+        push    es
+        push    cs
+        pop     ds
+        mov     al, 10
+        call    trace_putc
+        mov     al, '{'
+        call    trace_putc
+        mov     si, [first_mcb]
+        mov     cx, 60
+.dloop:
+        mov     al, ' '
+        call    trace_putc
+        mov     bx, si
+        call    trace_hexw
+        mov     es, si
+        mov     al, [es:MCB_SIG]
+        push    ax
+        shr     al, 4
+        call    trace_hexd
+        pop     ax
+        push    ax
+        call    trace_hexd
+        mov     al, ':'
+        call    trace_putc
+        mov     bx, [es:MCB_SIZE]
+        call    trace_hexw
+        mov     al, '/'
+        call    trace_putc
+        mov     bx, [es:MCB_OWNER]
+        call    trace_hexw
+        pop     ax
+        cmp     al, MCB_SIG_MID
+        jne     .ddone
+        add     si, [es:MCB_SIZE]
+        inc     si
+        loop    .dloop
+.ddone:
+        mov     al, '}'
+        call    trace_putc
+        mov     al, 10
+        call    trace_putc
+        pop     es
+        pop     ds
+        popa
+        ret
+
 chain_check:
         cmp     byte [chain_broken], 0
         jne     .out
@@ -81,10 +131,24 @@ chain_check:
         push    es
         push    cs
         pop     ds
-        ; 起動時に控えた first_mcb と食い違ったら、そこで報告する
+        ; first_mcb が化けていないか
         mov     ax, [first_mcb]
         cmp     ax, [mcb_canary]
+        jne     .bad
+        ; 連鎖を最後まで辿れるか
+        mov     si, ax
+        mov     cx, 60
+.loop:
+        mov     es, si
+        mov     al, [es:MCB_SIG]
+        cmp     al, MCB_SIG_LAST
         je      .ok
+        cmp     al, MCB_SIG_MID
+        jne     .bad
+        add     si, [es:MCB_SIZE]
+        inc     si
+        loop    .loop
+.bad:
         mov     byte [chain_broken], 1
         mov     al, 10
         call    trace_putc
@@ -92,9 +156,8 @@ chain_check:
         call    trace_putc
         mov     al, '#'
         call    trace_putc
-        mov     bx, ax
-        mov     bx, [first_mcb]
-        call    trace_hexw              ; 化けた値
+        mov     bx, si
+        call    trace_hexw              ; 壊れているブロック
         mov     al, '@'
         call    trace_putc
         mov     es, [u_ss]

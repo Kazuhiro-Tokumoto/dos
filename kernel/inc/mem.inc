@@ -36,8 +36,19 @@ mem_init:
         mov     byte [es:di + MCB_SIG], MCB_SIG_LAST
         mov     word [es:di + MCB_OWNER], MCB_OWNER_FREE
 
-        ; ブロックの大きさ = 640KB の末尾 - MCB 自身の 1 パラグラフ
-        mov     bx, MEM_TOP_SEG
+        ; ブロックの大きさ = 使えるメモリの末尾 - MCB 自身の 1 パラグラフ
+        ;
+        ; 末尾は 640KB 決め打ちにはできない。BIOS は EBDA (拡張 BIOS
+        ; データ領域) を 640KB のすぐ下に置くことがあり、そこには PS/2
+        ; マウスの状態やハードディスクの諸元表が入っている。BIOS は
+        ; 0040:0013 に「使える大きさ (KB)」を書いてあり、EBDA がある機械
+        ; では 640 ではなく 639 になっている。
+        ;
+        ; ここを 0xA000 に決め打ちしていると、上のほうまで使うプログラムが
+        ; EBDA を踏む。踏まれた BIOS は、そのあと出鱈目な値を返すように
+        ; なる。GEM がまさにこれで、大きなブロックを何個も取ったあとに
+        ; 転んでいた。
+        call    mem_top_from_bios       ; AX を壊さない
         sub     bx, ax
         dec     bx
         mov     [es:di + MCB_SIZE], bx
@@ -54,6 +65,35 @@ mem_init:
         pop     di
         pop     cx
         pop     bx
+        pop     ax
+        ret
+
+; ---------------------------------------------------------------------------
+; mem_top_from_bios - 使えるコンベンショナルメモリの上限を返す
+;   出力: BX = 上限のセグメント (AX は保存する)
+;
+; 0040:0013 に BIOS が KB 単位で書いている。1KB = 64 パラグラフ。
+; 値が化けていたら 640KB を上限として扱う。
+; ---------------------------------------------------------------------------
+mem_top_from_bios:
+        push    ax
+        push    es
+        push    cx
+        xor     cx, cx
+        mov     es, cx
+        mov     bx, [es:0x0413]         ; 使えるメモリ (KB)
+        cmp     bx, 64                  ; 小さすぎる値は信じない
+        jb      .fallback
+        cmp     bx, 640
+        ja      .fallback
+        mov     cl, 6
+        shl     bx, cl                  ; KB -> パラグラフ (x64)
+        jmp     .out
+.fallback:
+        mov     bx, MEM_TOP_SEG
+.out:
+        pop     cx
+        pop     es
         pop     ax
         ret
 
@@ -181,6 +221,9 @@ mem_alloc:
         jmp     .out
 
 .corrupt:
+%ifdef CHAIN_CHECK
+        call    chain_dump
+%endif
         ; どのブロックで連鎖が切れたかを出す。「メモリが足りない」と
         ; 「連鎖が壊れている」は症状が似ているので、番地と印の値が
         ; 分からないと追いようがない。

@@ -705,7 +705,17 @@ prog_load:
         mov     word [.maxparas], 0xFFFF
 .alloc_ready:
 
+%ifdef CHAIN_CHECK
+        mov     byte [chain_where], 'D'
+        call    chain_check
+%endif
         call    mem_largest             ; AX = 確保できる最大
+%ifdef CHAIN_CHECK
+        push    ax
+        mov     byte [chain_where], 'E'
+        call    chain_check
+        pop     ax
+%endif
         cmp     ax, [.minparas]
         jb      .no_mem
 
