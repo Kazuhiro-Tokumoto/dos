@@ -32,6 +32,18 @@ int21_dispatch:
         call    trace_hexd
         mov     al, bl
         call    trace_hexd
+        ; BX と ES も出す。メモリ関係 (48h/49h/4Ah/31h) は大きさが BX、
+        ; 対象のブロックが ES に入るので、これが見えないと
+        ; 「何段落くれと言われたのか」「どのブロックを返せと言われたのか」が
+        ; 分からない。
+        mov     al, ':'
+        call    trace_putc
+        mov     bx, [u_bx]
+        call    trace_hexw
+        mov     al, '/'
+        call    trace_putc
+        mov     bx, [u_es]
+        call    trace_hexw
         mov     al, ' '
         call    trace_putc
         pop     ds
@@ -115,6 +127,22 @@ trace_hexd:
         add     al, 'A' - 10 - '0'
 .d:     add     al, '0'
         call    trace_putc
+        pop     ax
+        ret
+
+; BX を 4 桁の 16 進で出す
+trace_hexw:
+        push    ax
+        mov     al, bh
+        shr     al, 4
+        call    trace_hexd
+        mov     al, bh
+        call    trace_hexd
+        mov     al, bl
+        shr     al, 4
+        call    trace_hexd
+        mov     al, bl
+        call    trace_hexd
         pop     ax
         ret
 %endif
@@ -1078,19 +1106,71 @@ f_57:
 ; ===========================================================================
 ; 58h - メモリ確保の戦略
 ; ===========================================================================
+; ===========================================================================
+; 58h - メモリの割り当て方
+;   AL=00h  いまの方針を返す        → AX = 方針
+;   AL=01h  方針を決める            (BL = 方針)
+;   AL=02h  UMB を連鎖に入れているか → AL = 0/1
+;   AL=03h  UMB を連鎖に入れる       (BX = 0/1)
+;
+; 方針の値は DOS 5.0 で増えた。下位 2bit が「どこを選ぶか」で、
+; 上位のビットが「どこから探すか」を表す。
+;
+;   00h 下から順に最初に合うもの   40h 上 (UMB) を先に  80h 上→下
+;   01h 下から順にいちばん近いもの 41h                  81h
+;   02h 下から順に最後に合うもの   42h                  82h
+;
+; ここを「0-2 以外は誤り」で弾くと、UMB へ載せようとするプログラムが
+; 全部そこで転ぶ。MYDOS は UMB を持たないので、上位のビットは受け取って
+; 覚えるだけで、実際の探し方は下位 2bit だけで決める (UMB の無い DOS の
+; 振る舞いと同じ)。値そのものは覚えておいて AL=00h でそのまま返す。
+;
+; AL=02h と 03h を「方針の設定」と一緒くたに扱っていたのが元の誤りで、
+; AL=03h (UMB を繋ぐ) が方針を書き換え、AL=02h が誤りとして返っていた。
+; CuteMouse はこの 4 つを順番に呼んでくるので、そこで話が噛み合わなくなる。
+; ===========================================================================
 f_58:
         mov     al, [u_ax]
         test    al, al
-        jnz     .set
+        jz      .get_strategy
+        cmp     al, 0x01
+        je      .set_strategy
+        cmp     al, 0x02
+        je      .get_umb_link
+        cmp     al, 0x03
+        je      .set_umb_link
+        jmp     .bad
+
+.get_strategy:
         movzx   ax, byte [alloc_strategy]
         mov     [u_ax], ax
         jmp     int21_ok
-.set:
+
+.set_strategy:
         mov     al, [u_bx]
-        cmp     al, 2
+        mov     ah, al
+        and     ah, 0x3F                ; 下位 6bit が「どこを選ぶか」
+        cmp     ah, 2
         ja      .bad
+        mov     ah, al
+        and     ah, 0xC0                ; 上位は 00h / 40h / 80h のみ
+        cmp     ah, 0xC0
+        je      .bad
         mov     [alloc_strategy], al
         jmp     int21_ok
+
+.get_umb_link:
+        movzx   ax, byte [umb_link]
+        mov     [u_ax], ax
+        jmp     int21_ok
+
+.set_umb_link:
+        mov     al, [u_bx]
+        cmp     al, 1
+        ja      .bad
+        mov     [umb_link], al
+        jmp     int21_ok
+
 .bad:
         mov     ax, ERR_FUNC
         jmp     int21_err
@@ -2451,6 +2531,7 @@ kernel_seg_ptr: dw      0                       ; セグメントは起動時に
 verify_flag:    db 0
 switch_char:    db '/'
 interim_flag:   db 0            ; AH=63h の「途中経過を表示する」旗
+umb_link:       db 0            ; UMB を MCB の連鎖に入れているか
 temp_counter:   dw 0
 code_page:      dw 932
 vol_label:      db 'MYDOS      '        ; 11 バイト

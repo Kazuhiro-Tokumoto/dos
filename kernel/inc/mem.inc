@@ -103,9 +103,19 @@ mem_alloc:
         jb      .next                   ; 足りない
 
         ; 戦略に応じて候補を選ぶ
-        cmp     byte [alloc_strategy], FIT_FIRST
+        ; 方針は下位 2bit だけを見る。上位のビットは「UMB を先に探すか」で、
+        ; MYDOS は UMB を持たないので探し方は変わらない。
+        push    ax
+        mov     al, [alloc_strategy]
+        and     al, 0x03
+        cmp     al, FIT_FIRST
+        pop     ax
         je      .take_now
-        cmp     byte [alloc_strategy], FIT_LAST
+        push    ax
+        mov     al, [alloc_strategy]
+        and     al, 0x03
+        cmp     al, FIT_LAST
+        pop     ax
         je      .remember               ; 最後に見つかったものを使う
         ; best fit: いま覚えているものより小さければ乗り換える
         test    si, si
@@ -168,6 +178,36 @@ mem_alloc:
         jmp     .out
 
 .corrupt:
+        ; どのブロックで連鎖が切れたかを出す。「メモリが足りない」と
+        ; 「連鎖が壊れている」は症状が似ているので、番地と印の値が
+        ; 分からないと追いようがない。
+%ifdef INT21_TRACE_ALL
+        push    ax
+        push    bx
+        push    ds
+        push    cs
+        pop     ds
+        mov     al, '!'
+        call    trace_putc
+        mov     bx, [.cur]
+        call    trace_hexw
+        mov     al, '='
+        call    trace_putc
+        push    es
+        mov     es, bx
+        mov     al, [es:MCB_SIG]
+        pop     es
+        push    ax
+        shr     al, 4
+        call    trace_hexd
+        pop     ax
+        call    trace_hexd
+        mov     al, '!'
+        call    trace_putc
+        pop     ds
+        pop     bx
+        pop     ax
+%endif
         mov     ax, ERR_MCB_DESTROYED
         xor     bx, bx
         stc
@@ -266,6 +306,54 @@ mem_coalesce:
         ret
 
 ; ---------------------------------------------------------------------------
+; mcb_in_chain - その MCB が本当に連鎖の上にあるか確かめる
+;   入力: AX = MCB のセグメント
+;   出力: CF=0 なら連鎖の上にある
+;
+; ES-1 の 1 バイトが 'M' か 'Z' に見えるかどうかだけで判断すると、
+; プログラムが渡してきた出鱈目なセグメントを受け入れてしまう。そこが
+; たまたま 4Dh か 5Ah なら「正しいブロック」として持ち主を 0 にするので、
+; 誰かのデータの真ん中に空きブロックがあることになり、次の確保で
+; アリーナごと壊れる。
+;
+; 実際、CuteMouse は自分の PSP の中を指すセグメントで解放を頼んでくる。
+; そこには 0 で埋めた PSP の一部があるだけなのだが、直前の INT 21h が
+; 呼び出し元の SS:SP を PSP に書き戻すため、その 1 バイトが 'M' に化ける
+; ことがある。そうなると解放が通ってしまい、次の確保で
+; 「MCB が壊れている」と返って常駐が失敗する。
+;
+; 連鎖を頭から辿って一致するものがあるかを見れば、この種の取り違えは
+; すべて弾ける。ブロックの数はたかだか数十なので、費用は問題にならない。
+; ---------------------------------------------------------------------------
+mcb_in_chain:
+        push    bx
+        push    cx
+        push    es
+        mov     bx, [first_mcb]
+        mov     cx, MCB_CHAIN_MAX
+.loop:
+        cmp     bx, ax
+        je      .found
+        mov     es, bx
+        cmp     byte [es:MCB_SIG], MCB_SIG_MID
+        jne     .no                     ; 'Z' なら終わり、それ以外は壊れている
+        add     bx, [es:MCB_SIZE]
+        inc     bx
+        loop    .loop
+.no:
+        pop     es
+        pop     cx
+        pop     bx
+        stc
+        ret
+.found:
+        pop     es
+        pop     cx
+        pop     bx
+        clc
+        ret
+
+; ---------------------------------------------------------------------------
 ; mem_free - ブロックを解放する
 ;   入力: ES = ブロック本体のセグメント (MCB ではない)
 ;   出力: CF=1 なら AX = エラーコード
@@ -279,13 +367,20 @@ mem_free:
         mov     es, bx
 
         cmp     byte [es:MCB_SIG], MCB_SIG_MID
-        je      .ok
+        je      .maybe
         cmp     byte [es:MCB_SIG], MCB_SIG_LAST
-        je      .ok
+        je      .maybe
+.bad:
         mov     ax, ERR_BAD_MCB
         stc
         jmp     .out
-.ok:
+.maybe:
+        ; 印が合っているだけでは足りない。連鎖の上にあることまで確かめる。
+        push    ax
+        mov     ax, bx
+        call    mcb_in_chain
+        pop     ax
+        jc      .bad
         mov     word [es:MCB_OWNER], MCB_OWNER_FREE
         call    mem_coalesce
         clc
@@ -317,12 +412,19 @@ mem_resize:
         mov     es, dx
 
         cmp     byte [es:MCB_SIG], MCB_SIG_MID
-        je      .ok
+        je      .maybe
         cmp     byte [es:MCB_SIG], MCB_SIG_LAST
-        je      .ok
+        je      .maybe
+.bad_mcb:
         mov     ax, ERR_BAD_MCB
         stc
         jmp     .out
+.maybe:
+        push    ax
+        mov     ax, dx                  ; DX = この MCB のセグメント
+        call    mcb_in_chain
+        pop     ax
+        jc      .bad_mcb
 .ok:
         mov     cx, [es:MCB_SIZE]       ; CX = 今の大きさ
         cmp     bx, cx

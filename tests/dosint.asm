@@ -88,6 +88,7 @@ start:
         call    t_country
         call    t_sda
         call    t_dbcs
+        call    t_memstrat
 
         call    newline
         mov     si, msg_result
@@ -804,6 +805,73 @@ t_dbcs:
         int     0x21
         jmp     pass
 
+; ---------------------------------------------------------------------------
+; AH=58h - メモリの割り当て方
+;
+; 下位機能は 4 つある。00h/01h が方針の取得と設定、02h/03h が
+; 「UMB を MCB の連鎖に入れるかどうか」の取得と設定。
+;
+; 方針の値は DOS 5.0 で増えていて、上位のビットが「上 (UMB) を先に探すか」
+; を表す。40h や 80h を付けた値を「範囲外」で弾くと、UMB へ載ろうとする
+; プログラムがそこで転ぶ。CuteMouse は 00h→02h→03h→01h(41h)→01h(81h) と
+; 順に呼んでくるので、1 つでも食い違うと常駐に失敗する。
+; ---------------------------------------------------------------------------
+t_memstrat:
+        mov     si, n_memstrat
+        call    begin
+
+        ; いまの方針を控える
+        mov     ax, 0x5800
+        int     0x21
+        jc      fail
+        mov     [strat_save], ax
+
+        ; 上位ビット付きの方針が通ること
+        mov     ax, 0x5801
+        mov     bx, 0x0041              ; 上を先に / いちばん近いもの
+        int     0x21
+        jc      fail
+        mov     ax, 0x5800
+        int     0x21
+        jc      fail
+        cmp     al, 0x41
+        jne     fail
+
+        mov     ax, 0x5801
+        mov     bx, 0x0081
+        int     0x21
+        jc      fail
+
+        ; 出鱈目な値は断ること
+        mov     ax, 0x5801
+        mov     bx, 0x00C3
+        int     0x21
+        jnc     fail
+
+        ; UMB を連鎖に入れるかどうかの取得と設定
+        mov     ax, 0x5802
+        int     0x21
+        jc      fail
+        mov     ax, 0x5803
+        mov     bx, 1
+        int     0x21
+        jc      fail
+        mov     ax, 0x5802
+        int     0x21
+        jc      fail
+        cmp     al, 1
+        jne     fail
+        mov     ax, 0x5803
+        mov     bx, 0
+        int     0x21
+        jc      fail
+
+        ; 元に戻す
+        mov     ax, 0x5801
+        mov     bx, [strat_save]
+        int     0x21
+        jmp     pass
+
 begin:
         push    si
         mov     si, str_indent
@@ -919,6 +987,8 @@ n_dev:       db 'LoL+22  device chain NUL-CON-AUX-PRN-CLOCK$-block', 0
 n_sft:       db 'LoL+04  SFT chain shows an open file by name', 0
 n_cds:       db 'LoL+16  CDS array follows CHDIR', 0
 n_buf:       db 'LoL+12  disk buffer chain is linked', 0
+n_memstrat:  db 'AH=58h  allocation strategy and the UMB link', 0
+strat_save:  dw 0
 n_dbcs:      db 'AH=63h  the DBCS table pointer really is replaced', 0
 dbcs_seg:    dw 0
 dbcs_off:    dw 0
